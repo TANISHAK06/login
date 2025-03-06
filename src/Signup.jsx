@@ -376,7 +376,11 @@ const Signup = () => {
       </main>
       <footer className="relative z-10 py-4 text-center text-blue-300 text-sm">
         <div className="container mx-auto">
-          <p>© 2025 Telio Labs AI. Powering next-generation intelligence.</p>
+          <p>
+            {" "}
+            Be our part 😊 © 2025 Telio Labs AI. Powering next-generation
+            intelligence.
+          </p>
         </div>
       </footer>
     </div>
