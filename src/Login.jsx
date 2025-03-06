@@ -334,11 +334,12 @@ const Login = () => {
           </div>
         )}
       </main>
-
-      {/* Light theme footer */}
       <footer className="relative z-10 py-4 text-center text-blue-600 text-sm">
         <div className="container mx-auto">
-          <p>© 2025 Telio Labs. Powering next-generation intelligence.</p>
+          <p>
+            Be the part 😊 © 2025 Telio Labs. Powering next-generation
+            intelligence.
+          </p>
         </div>
       </footer>
     </div>

@@ -374,8 +374,6 @@ const Signup = () => {
           </div>
         </div>
       </main>
-
-      {/* Neural network-style footer */}
       <footer className="relative z-10 py-4 text-center text-blue-300 text-sm">
         <div className="container mx-auto">
           <p>© 2025 Telio Labs AI. Powering next-generation intelligence.</p>
