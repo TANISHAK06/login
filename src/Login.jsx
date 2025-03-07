@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import Header from "./components/Header";
+
 // API base URL
 const API_BASE_URL = "http://localhost:5000/api/";
 
 const Login = () => {
   const [credentials, setCredentials] = useState({
-    username: "",
+    email: "",
     password: "",
   });
   const [error, setError] = useState("");
@@ -149,21 +150,81 @@ const Login = () => {
               <p className="text-green-500">Authentication completed</p>
             </div>
 
-            <div className="mb-6 bg-blue-50 p-4 rounded-lg border border-blue-100">
-              <h3 className="text-lg font-semibold text-blue-700 mb-3">
-                API Response Data:
-              </h3>
-              <pre className="bg-white p-3 rounded border border-blue-100 overflow-auto max-h-64 text-sm">
-                {JSON.stringify(userData, null, 2)}
-              </pre>
+            <div className="space-y-5">
+              {/* Role Badge */}
+              {userData.role && (
+                <div className="flex justify-center mb-2">
+                  <span className="bg-blue-100 text-blue-800 text-sm font-medium px-4 py-1.5 rounded-full">
+                    Role:{" "}
+                    {userData.role.charAt(0).toUpperCase() +
+                      userData.role.slice(1)}
+                  </span>
+                </div>
+              )}
+
+              {/* JWT Token Display */}
+              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-5 rounded-lg border border-blue-100">
+                <h3 className="text-lg font-semibold text-blue-700 mb-3 flex items-center">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    className="h-5 w-5 mr-2"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M18 8a6 6 0 01-7.743 5.743L10 14l-1 1-1 1H6v-1l1-1 1-1 .757-.757A6 6 0 1118 8zm-6-4a1 1 0 100 2 1 1 0 000-2z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                  Authentication Token
+                </h3>
+
+                {userData.token ? (
+                  <div className="relative bg-gray-900 rounded-lg p-4 font-mono text-xs text-green-400 overflow-x-auto shadow-inner">
+                    <div className="absolute top-0 right-0 p-2">
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(userData.token);
+                          alert("Token copied to clipboard!");
+                        }}
+                        className="text-gray-400 hover:text-white focus:outline-none"
+                        title="Copy to clipboard"
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          className="h-4 w-4"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                    <div className="break-all whitespace-pre-wrap">
+                      {userData.token}
+                    </div>
+                  </div>
+                ) : (
+                  <p>No token received</p>
+                )}
+              </div>
             </div>
 
-            <button
-              onClick={handleLogout}
-              className="w-full py-3 px-4 rounded-lg font-medium text-white transition-all duration-300 bg-blue-500 hover:bg-blue-400 shadow-md hover:shadow-blue-300/50 transform hover:-translate-y-1"
-            >
-              Logout
-            </button>
+            <div className="mt-8">
+              <button
+                onClick={handleLogout}
+                className="w-full py-3 px-4 rounded-lg font-medium text-white transition-all duration-300 bg-blue-500 hover:bg-blue-400 shadow-md hover:shadow-blue-300/50 transform hover:-translate-y-1"
+              >
+                Logout
+              </button>
+            </div>
           </div>
         ) : (
           <div className="bg-white bg-opacity-80 backdrop-filter backdrop-blur-lg p-8 rounded-2xl shadow-xl w-full max-w-md border border-blue-200 transition-all duration-500 hover:shadow-2xl">
@@ -235,12 +296,12 @@ const Login = () => {
                   </div>
                   <input
                     type="text"
-                    id="username"
-                    name="username"
-                    value={credentials.username}
+                    id="email"
+                    name="email"
+                    value={credentials.email}
                     onChange={handleChange}
                     className="w-full pl-10 pr-3 py-3 bg-blue-50 text-gray-800 placeholder-gray-500 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent transition-all duration-300"
-                    placeholder="Enter your username"
+                    placeholder="Enter your email"
                     required
                   />
                 </div>
@@ -336,10 +397,12 @@ const Login = () => {
       </main>
       <footer className="relative z-10 py-4 text-center text-blue-600 text-sm">
         <div className="container mx-auto">
-          <p>© 2025 Telio Labs. Powering next-generation intelligence.</p>
+          <p>© 2025 Telio Labs. Frontend created by Tanishak Shukla.</p>
         </div>
       </footer>
+      ;
     </div>
   );
 };
+
 export default Login;

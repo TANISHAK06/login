@@ -7,6 +7,7 @@ const API_BASE_URL = "http://localhost:5000/api/";
 
 const Signup = () => {
   const [userData, setUserData] = useState({
+    name: "",
     username: "",
     email: "",
     password: "",
@@ -72,6 +73,7 @@ const Signup = () => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          name: userData.name,
           username: userData.username,
           email: userData.email,
           password: userData.password,
@@ -159,6 +161,41 @@ const Signup = () => {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label
+                htmlFor="name"
+                className="block text-blue-300 font-medium mb-2 text-sm tracking-wide"
+              >
+                FULL NAME
+              </label>
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    className="h-5 w-5 text-blue-400"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </div>
+                <input
+                  type="text"
+                  id="name"
+                  name="name"
+                  value={userData.name}
+                  onChange={handleChange}
+                  className="w-full pl-10 pr-3 py-3 bg-gray-700 bg-opacity-50 text-white placeholder-gray-400 border border-blue-500 border-opacity-30 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
+                  placeholder="Enter your full name"
+                  required
+                />
+              </div>
+            </div>
+
             <div>
               <label
                 htmlFor="username"
@@ -378,8 +415,8 @@ const Signup = () => {
         <div className="container mx-auto">
           <p>
             {" "}
-            Be our part 😊 © 2025 Telio Labs AI. Powering next-generation
-            intelligence.
+            Be our part 😊 © 2025 Telio Labs AI. Frontend Created by Tanishak
+            Shukla.
           </p>
         </div>
       </footer>
