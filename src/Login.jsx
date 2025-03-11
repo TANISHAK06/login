@@ -1,9 +1,8 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import Header from "./components/Header";
 import ParticleBackground from "./components/ParticleBackground";
 import LoginForm from "./components/LoginForm";
-import UserProfile from "./components/UserProfile";
 
 // API base URL
 const API_BASE_URL = "http://localhost:5000/api/";
@@ -15,8 +14,15 @@ const Login = () => {
   });
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [userData, setUserData] = useState(null);
   const navigate = useNavigate();
+
+  // Check if user is already logged in
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (token) {
+      navigate("/chat");
+    }
+  }, [navigate]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -30,7 +36,6 @@ const Login = () => {
     e.preventDefault();
     setError("");
     setIsLoading(true);
-    setUserData(null);
 
     try {
       const response = await fetch(`${API_BASE_URL}/login`, {
@@ -47,21 +52,17 @@ const Login = () => {
         throw new Error(data.message || "Login failed");
       }
 
-      // Store user token
+      // Store user data in localStorage
       localStorage.setItem("token", data.token);
+      localStorage.setItem("userData", JSON.stringify(data));
 
-      // Set the user data to be displayed instead of redirecting
-      setUserData(data);
+      // Redirect to chat page
+      navigate("/chat");
     } catch (err) {
       setError(err.message || "An error occurred during login");
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const handleLogout = () => {
-    setUserData(null);
-    localStorage.removeItem("token");
   };
 
   return (
@@ -72,17 +73,13 @@ const Login = () => {
       <Header />
 
       <main className="flex-grow flex items-center justify-center p-4 relative z-10">
-        {userData ? (
-          <UserProfile userData={userData} handleLogout={handleLogout} />
-        ) : (
-          <LoginForm
-            credentials={credentials}
-            handleChange={handleChange}
-            handleSubmit={handleSubmit}
-            error={error}
-            isLoading={isLoading}
-          />
-        )}
+        <LoginForm
+          credentials={credentials}
+          handleChange={handleChange}
+          handleSubmit={handleSubmit}
+          error={error}
+          isLoading={isLoading}
+        />
       </main>
 
       <footer className="relative z-10 py-4 text-center text-blue-600 text-sm">
