@@ -122,11 +122,11 @@ const ChatInterface = ({ userData }) => {
 
     try {
       // Send request to AI endpoint
-      const response = await fetch("http://127.0.0.1:8080/lam", {
+      const response = await fetch("http://127.0.0.1:5000/action", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-auth-token": localStorage.getItem("token"),
+          //"x-auth-token": localStorage.getItem("token"),
         },
         body: JSON.stringify({ query: messageText }),
       });
@@ -140,7 +140,7 @@ const ChatInterface = ({ userData }) => {
       // Add system response
       const systemMessage = {
         id: messages.length + 2,
-        text: data.response || "I'm processing your request...",
+        text: data.message || data.error || "I'm processing your request...",
         sender: "system",
         timestamp: new Date(),
       };

@@ -60,7 +60,7 @@ const MessageInput = ({
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
-              rotate="reverse"
+              transform="rotate(90 0 0)"
             >
               <path
                 strokeLinecap="round"

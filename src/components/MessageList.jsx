@@ -61,7 +61,7 @@ const MessageList = ({
                           : "text-gray-800"
                       }`}
                     >
-                      {message.sender === "user" ? "You" : "AI Assistant"}
+                      {message.sender === "user" ? "You" : "LAM In Action"}
                     </span>
                     <span
                       className={`text-xs ml-2 ${

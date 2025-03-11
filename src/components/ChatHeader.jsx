@@ -46,7 +46,7 @@ const ChatHeader = ({
                 theme === "dark" ? "text-white" : "text-gray-800"
               } transition-colors duration-500`}
             >
-              AI Assistant
+              Welcome to Teliolabs LAM
             </motion.h1>
             <motion.p
               initial={{ x: -20, opacity: 0 }}
