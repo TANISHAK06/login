@@ -1,5 +1,6 @@
-import React from "react";
+import React, { useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import WebSearchResults from "./WebSearchResults"; // Import the WebSearchResults component
 
 const MessageList = ({
   messages,
@@ -10,10 +11,77 @@ const MessageList = ({
   showSuggestions,
   suggestions,
   handleSendMessage,
+  voiceEnabled,
 }) => {
   const formatTime = (date) => {
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   };
+
+  // Create a ref for the currently speaking message
+  const speakingRef = useRef(null);
+
+  // Function to speak the message text
+  const speakMessage = (messageText) => {
+    if (!voiceEnabled || !window.speechSynthesis) return;
+
+    // Cancel any ongoing speech
+    window.speechSynthesis.cancel();
+
+    // Create a new speech instance
+    const speech = new SpeechSynthesisUtterance(messageText);
+
+    // Get available voices
+    const voices = window.speechSynthesis.getVoices();
+
+    // Try to find a good voice - preferably a female voice
+    const preferredVoice =
+      voices.find(
+        (voice) =>
+          voice.lang.includes("en") &&
+          (voice.name.includes("Female") || voice.name.includes("Samantha"))
+      ) ||
+      voices.find((voice) => voice.lang.includes("en")) ||
+      voices[0];
+
+    if (preferredVoice) {
+      speech.voice = preferredVoice;
+    }
+
+    speech.rate = 1.0;
+    speech.pitch = 1.0;
+
+    // Store the speech instance in ref
+    speakingRef.current = speech;
+
+    // Speak the text
+    window.speechSynthesis.speak(speech);
+  };
+
+  // Effect to handle speaking the latest system message
+  useEffect(() => {
+    if (messages.length > 0 && voiceEnabled) {
+      const latestMessage = messages[messages.length - 1];
+      if (latestMessage.sender === "system" && !latestMessage.error) {
+        speakMessage(latestMessage.text);
+      }
+    }
+  }, [messages, voiceEnabled]);
+
+  // Effect to cancel speech when voice is disabled
+  useEffect(() => {
+    if (!voiceEnabled && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+  }, [voiceEnabled]);
+
+  // Effect to clean up speech on component unmount
+  useEffect(() => {
+    return () => {
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
 
   return (
     <div className="flex-grow p-4 md:p-6 overflow-auto">
@@ -74,6 +142,23 @@ const MessageList = ({
                     >
                       {formatTime(message.timestamp)}
                     </span>
+
+                    {/* Add play button for system messages */}
+                    {/*message.sender === "system" && !message.error && (
+                      <motion.button
+                        onClick={() => speakMessage(message.text)}
+                        whileHover={{ scale: 1.1 }}
+                        whileTap={{ scale: 0.9 }}
+                        className={`ml-auto text-sm p-1 rounded-full ${
+                          theme === "dark"
+                            ? "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                            : "bg-gray-200 text-gray-600 hover:bg-gray-300"
+                        }`}
+                        title="Play message"
+                      >
+                        🔊
+                      </motion.button>
+                    )*/}
                   </div>
                   <div
                     className={`text-sm md:text-base ${
@@ -90,6 +175,13 @@ const MessageList = ({
                       </p>
                     ))}
                   </div>
+
+                  {/* Render WebSearchResults if search results are present */}
+                  {message.searchResults && (
+                    <div className="mt-4">
+                      <WebSearchResults results={message.searchResults} />
+                    </div>
+                  )}
                 </div>
               </motion.div>
             ))}
@@ -118,9 +210,6 @@ const MessageList = ({
                     animate={{ scale: [1, 1.2, 1] }}
                     transition={{
                       duration: 1.5,
-                      repeat: Infinity,
-                      repeatType: "loop",
-                      delay: 0.2,
                     }}
                     className={`w-3 h-3 rounded-full ${themeClasses[theme].secondary}`}
                   ></motion.div>

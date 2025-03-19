@@ -17,6 +17,8 @@ const ChatInterface = ({ userData }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(true);
   const [theme, setTheme] = useState("blue");
+  // Add new state for voice output
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const navigate = useNavigate();
@@ -24,7 +26,7 @@ const ChatInterface = ({ userData }) => {
   const suggestions = [
     "Tell me about Financial updates?",
     "Send the email to anyone",
-    "Explain admission merits simply",
+    "Search for machine learning basics",
   ];
 
   const themeClasses = {
@@ -93,7 +95,20 @@ const ChatInterface = ({ userData }) => {
       setShowSuggestions(true);
     }, 1000);
 
-    return () => clearTimeout(timer);
+    // Initialize speech synthesis voices if browser supports it
+    if (window.speechSynthesis) {
+      window.speechSynthesis.onvoiceschanged = () => {
+        // Voices loaded (needed for some browsers)
+      };
+    }
+
+    return () => {
+      clearTimeout(timer);
+      // Cancel any ongoing speech when component unmounts
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+    };
   }, [navigate]);
 
   const scrollToBottom = () => {
@@ -137,14 +152,27 @@ const ChatInterface = ({ userData }) => {
 
       const data = await response.json();
 
-      // Add system response
-      const systemMessage = {
-        id: messages.length + 2,
-        text: data.message || data.error || "I'm processing your request...",
-        sender: "system",
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, systemMessage]);
+      // Check if this is a web search result
+      if (data.results && Array.isArray(data.results)) {
+        // This is a web search response
+        const systemMessage = {
+          id: messages.length + 2,
+          text: "Here are the search results I found:",
+          sender: "system",
+          timestamp: new Date(),
+          searchResults: data.results, // Pass search results to the message
+        };
+        setMessages((prev) => [...prev, systemMessage]);
+      } else {
+        // This is a regular text response
+        const systemMessage = {
+          id: messages.length + 2,
+          text: data.message || "I'm processing your request...",
+          sender: "system",
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, systemMessage]);
+      }
     } catch (error) {
       console.error("Error sending message:", error);
       // Add error message
@@ -194,6 +222,7 @@ const ChatInterface = ({ userData }) => {
         showSuggestions={showSuggestions}
         suggestions={suggestions}
         handleSendMessage={handleSendMessage}
+        voiceEnabled={voiceEnabled} // Add voice enabled prop
       />
 
       <MessageInput
@@ -204,6 +233,8 @@ const ChatInterface = ({ userData }) => {
         theme={theme}
         themeClasses={themeClasses}
         inputRef={inputRef}
+        voiceEnabled={voiceEnabled} // Add voice enabled prop
+        setVoiceEnabled={setVoiceEnabled} // Add voice toggle function
       />
     </div>
   );

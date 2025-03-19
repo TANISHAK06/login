@@ -1,7 +1,6 @@
 import os
 from dotenv import load_dotenv
 import json
-import openai
 import smtplib
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
@@ -16,6 +15,14 @@ from flask_cors import CORS
 import pandas as pd
 from io import BytesIO
 import traceback
+from groq import Groq
+import datetime
+import re
+from dateutil import parser
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 
 # Load environment variables from .env file
 load_dotenv()
@@ -28,6 +35,9 @@ db_uri = os.environ.get("MYSQL_URI", "sqlite:///poc.db")
 app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
+
+# OAuth 2.0 scopes for Google Calendar
+SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 # ----- MODELS -----
 class Task(db.Model):
@@ -51,6 +61,9 @@ def send_email(recipient, subject, body, schedule_time=None, attachment=None):
     sender_password = os.environ.get('SENDER_PASSWORD')
     smtp_server = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
     smtp_port = int(os.environ.get('SMTP_PORT', 587))
+    
+    if not all([sender_email, sender_password]):
+        return False, "Missing email configuration in environment variables."
 
     message = MIMEMultipart()
     message['From'] = sender_email
@@ -187,15 +200,85 @@ def perform_scraping_news(query_details):
     except Exception as e:
         return False, str(e)
 
-def perform_scraping(target, query_details):
-    if target.lower() == "news":
-        return perform_scraping_news(query_details)
-    elif target.lower() == "stocks":
-        return True, f"Simulated stock data for query '{query_details}'."
-    elif target.lower() == "weather":
-        return True, f"Simulated weather info for query '{query_details}'."
-    else:
-        return False, "Unsupported scraping target."
+# ----- Web Scraping for Summarization -----
+def scrape_and_summarize(url):
+    try:
+        # Check if GROQ API key is available
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            return False, "Missing GROQ_API_KEY environment variable."
+            
+        # Fetch the webpage content
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()  # Raise an error for bad status codes
+
+        # Parse the HTML content
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Extract text from the webpage
+        text = " ".join([p.get_text() for p in soup.find_all('p')])  # Extract text from <p> tags
+        if not text:
+            return False, "No text found on the webpage."
+
+        # Summarize the text using the LLM
+        client = Groq(api_key=groq_api_key)
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant that summarizes web content. Provide a concise summary of the following text."
+            },
+            {"role": "user", "content": f"Summarize this text: {text[:9000]}"}  # Limit input to 10000 characters
+        ]
+
+        response = client.chat.completions.create(
+            model="mixtral-8x7b-32768",  # Replace with the appropriate Groq model
+            messages=messages,
+            max_tokens=300,
+            temperature=0.0,
+            top_p=1,
+        )
+
+        summary = response.choices[0].message.content.strip()
+        return True, summary
+
+    except requests.RequestException as e:
+        return False, f"Failed to fetch the webpage: {str(e)}"
+    except Exception as e:
+        return False, f"An error occurred: {str(e)}"
+
+# ----- Web Search using SerpApi -----
+def perform_web_search(query, api_key):
+    """
+    Perform a web search using SerpApi.
+    """
+    params = {
+        "q": query,          # User's search query
+        "api_key": api_key,  # SerpApi API key
+        "engine": "google"  # Use Google as the search engine
+    }
+
+    try:
+        response = requests.get("https://serpapi.com/search", params=params)
+        response.raise_for_status()  # Raise an error for bad status codes
+        data = response.json()
+
+        # Extract and format search results
+        if "organic_results" in data:
+            results = []
+            for result in data["organic_results"]:
+                results.append({
+                    "title": result.get("title", "No title"),
+                    "link": result.get("link", "No link"),
+                    "snippet": result.get("snippet", "No description")
+                })
+            return True, results
+        else:
+            return False, "No search results found."
+    except Exception as e:
+        return False, str(e)
 
 # ----- Messaging (WhatsApp/Telegram) -----
 def send_whatsapp_message(recipient, message_text):
@@ -228,78 +311,223 @@ def process_payment(amount, currency, order_id, description):
     # In a real integration, you'd call Razorpay's API here.
     return True, f"Processed payment of {amount} {currency} for order {order_id}. Description: {description}"
 
-# ----- OPENAI INTEGRATION -----
+# ----- CALENDAR INTEGRATION -----
+def get_calendar_service():
+    """Get authenticated Google Calendar service."""
+    creds = None
+    token_path = os.environ.get('GOOGLE_TOKEN_PATH', 'token.json')
+    credentials_path = os.environ.get('GOOGLE_CREDENTIALS_PATH', 'credentials.json')
+    
+    # Check if token already exists
+    if os.path.exists(token_path):
+        creds = Credentials.from_authorized_user_info(json.loads(open(token_path).read()), SCOPES)
+    
+    # If there are no valid credentials, let the user log in
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists(credentials_path):
+                return False, "Missing Google Calendar credentials file."
+            flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
+            creds = flow.run_local_server(port=0)
+        
+        # Save the credentials for the next run
+        with open(token_path, 'w') as token:
+            token.write(creds.to_json())
+    
+    return True, build('calendar', 'v3', credentials=creds)
+
+def parse_meeting_details(meeting_data):
+    """Parse meeting details from calendar request data."""
+    title = meeting_data.get('title', 'Untitled Meeting')
+    description = meeting_data.get('description', '')
+    location = meeting_data.get('location', '')
+    date_str = meeting_data.get('date', '')
+    time_str = meeting_data.get('time', '')
+    duration_str = meeting_data.get('duration', '1 hour')
+    attendees_list = meeting_data.get('attendees', [])
+    
+    # Parse date and time
+    try:
+        # Try to parse combined date and time if available
+        if date_str and time_str:
+            datetime_str = f"{date_str} {time_str}"
+            start_time = parser.parse(datetime_str)
+        elif date_str:
+            # If only date is provided, default to noon
+            start_time = parser.parse(date_str)
+            default_time = datetime.time(12, 0)
+            start_time = datetime.datetime.combine(start_time.date(), default_time)
+        else:
+            # If no date/time, use tomorrow at noon
+            tomorrow = datetime.date.today() + datetime.timedelta(days=1)
+            start_time = datetime.datetime.combine(tomorrow, datetime.time(12, 0))
+        
+        # Parse duration
+        duration_hours = 1  # Default 1 hour
+        if duration_str:
+            duration_match = re.search(r'(\d+)\s*(?:hour|hr)', duration_str, re.IGNORECASE)
+            if duration_match:
+                duration_hours = int(duration_match.group(1))
+            
+            # Check for minutes
+            minutes_match = re.search(r'(\d+)\s*(?:minute|min)', duration_str, re.IGNORECASE)
+            minutes = 0
+            if minutes_match:
+                minutes = int(minutes_match.group(1))
+                duration_hours += minutes / 60
+        
+        end_time = start_time + datetime.timedelta(hours=duration_hours)
+        
+        return True, {
+            'title': title,
+            'description': description,
+            'location': location,
+            'start_time': start_time,
+            'end_time': end_time,
+            'attendees': attendees_list
+        }
+    except Exception as e:
+        return False, f"Failed to parse meeting details: {str(e)}"
+def add_calendar_event(meeting_data):
+    """Add a calendar event using Google Calendar API."""
+    try:
+        # Get calendar service
+        success, service = get_calendar_service()
+        if not success:
+            return False, service  # Error message
+        
+        # Parse meeting details
+        success, details = parse_meeting_details(meeting_data)
+        if not success:
+            return False, details  # Error message
+        
+        # Format attendees
+        attendees = [{'email': email} for email in details['attendees']] if details['attendees'] else []
+        
+        # Create event
+        event = {
+            'summary': details['title'],
+            'location': details['location'],
+            'description': details['description'],
+            'start': {
+                'dateTime': details['start_time'].isoformat(),
+                'timeZone': 'America/New_York',  # Adjust as needed
+            },
+            'end': {
+                'dateTime': details['end_time'].isoformat(),
+                'timeZone': 'America/New_York',  # Adjust as needed
+            },
+            'attendees': attendees,
+            'reminders': {
+                'useDefault': True
+            },
+        }
+        
+        # Insert the event
+        calendar_id = 'primary'  # Use primary calendar
+        event = service.events().insert(calendarId=calendar_id, body=event).execute()
+        
+        # Send email to attendees
+        if attendees:
+            subject = f"Invitation: {details['title']}"
+            body = f"You have been invited to a meeting:\n\nTitle: {details['title']}\nDescription: {details['description']}\nTime: {details['start_time'].strftime('%Y-%m-%d %H:%M')} to {details['end_time'].strftime('%H:%M')}\nLocation: {details['location']}\n\nMeeting Link: {event.get('htmlLink')}"
+            for attendee in attendees:
+                send_email(attendee['email'], subject, body)
+        
+        return True, {
+            'message': f"Meeting '{details['title']}' scheduled successfully.",
+            'event_id': event.get('id'),
+            'event_link': event.get('htmlLink')
+        }
+    except Exception as e:
+        return False, f"Failed to add calendar event: {str(e)}"
+
+# ----- GROQ INTEGRATION -----
 def get_action_from_llm(query):
-    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        return False, "Missing GROQ_API_KEY environment variable."
+        
+    client = Groq(api_key=groq_api_key)
 
     messages = [
-
         {
-
             "role": "system",
-
             "content": (
+                "You are an AI assistant that classifies user requests into specific actions. "
+                "You must respond with ONLY a valid JSON object containing action details. "
+                "Never include any explanations, markdown, or text outside the JSON object.\n\n"
+                "Available actions:\n"
+                "1) email - When the user wants to send an email\n"
+                "2) task - When the user wants to manage tasks (create, read, update, delete)\n"
+                "3) scrape - When the user wants news information\n"
+                "4) message - When the user wants to send messages via WhatsApp or Telegram\n"
+                "5) payment - When the user wants to process a payment\n"
+                "6) chat - For normal conversation\n"
+                "7) summarize - For summarizing a webpage\n"
+                "8) web_search - For performing a web search\n"
+                "9) calendar - When the user wants to schedule a meeting or event\n\n"
+                
+                "Example formats:\n"
+                "For email: {\"action\": \"email\", \"recipient\": \"email@example.com\", \"subject\": \"Meeting\", \"body\": \"Let's meet tomorrow\"}\n"
+                "For web search: {\"action\": \"web_search\", \"query\": \"latest news\"}\n"
+                "For chat: {\"action\": \"chat\", \"body\": \"I'm here to help!\"}\n"
+                "For task: {\"action\": \"task\", \"task_action\": \"create\", \"task_data\": {\"title\": \"Meeting\", \"description\": \"Team meeting\"}}\n"
+                "For summarize: {\"action\": \"summarize\", \"url\": \"https://example.com\"}\n"
+                "For calendar: {\"action\": \"calendar\", \"meeting_data\": {\"title\": \"Team Meeting\", \"date\": \"2025-03-28\", \"time\": \"10:00\", \"duration\": \"1 hour\", \"attendees\": [\"colleague@example.com\"]}}\n\n"
 
-                "You can handle these actions:\n"
-
-                "1) email\n"
-
-                "2) task\n"
-
-                "3) scrape\n"
-
-                "4) message\n"
-
-                "5) payment\n"
-
-                "6) chat (for normal conversation)\n\n"
-
-                "If the user is just greeting or saying 'Hello', produce:\n"
-
-                "{\n"
-
-                "  \"action\": \"chat\",\n"
-
-                "  \"body\": \"Hi there! How can I help you today?\"\n"
-
-                "}\n\n"
-
-                "For an email, you MUST include 'recipient', 'subject', 'body'.\n"
-
-                "For a task, 'operation' must be exactly one of: 'create', 'read', 'update', 'delete'.\n"
-
-                "For a payment, you MUST provide 'amount' or fallback defaults.\n"
-
-                "For a message, you MUST produce 'platform', 'recipient', 'message'.\n"
-
-                "Output only valid JSON.\n"
-
+                "For calendar actions, extract as much information as possible including title, date, time, duration, location, description, and attendees if available. If date or time is specified in a natural way like 'tomorrow at 2pm' or '28th March', parse and convert it to proper date format.\n\n"
+                
+                "ALWAYS return ONLY valid JSON with no additional text, explanations, or formatting."
             )
-
         },
-
         {"role": "user", "content": f'Query: "{query}"'}
-
     ]
- 
+
     try:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="mixtral-8x7b-32768",
             messages=messages,
             max_tokens=300,
             temperature=0.0,
             top_p=1,
+            response_format={"type": "json_object"}  # Force JSON response format
         )
 
         text = response.choices[0].message.content.strip()
-        action_data = json.loads(text)  # Ensure response is valid JSON
+        
+        # Handle any potential non-JSON content by extracting just the JSON part
+        try:
+            # Try to parse as is first
+            action_data = json.loads(text)
+        except json.JSONDecodeError:
+            # Try to extract just the JSON portion if there's extra text
+            import re
+            json_pattern = r'({.*})'
+            match = re.search(json_pattern, text, re.DOTALL)
+            if match:
+                json_text = match.group(1)
+                try:
+                    action_data = json.loads(json_text)
+                except:
+                    # If still failing, provide a fallback response
+                    action_data = {"action": "chat", "body": "I couldn't understand that request. Could you rephrase it?"}
+            else:
+                # Fallback if no JSON-like structure found
+                action_data = {"action": "chat", "body": "I couldn't understand that request. Could you rephrase it?"}
+        
         return True, action_data
 
-    except json.JSONDecodeError:
-        return False, "Invalid JSON response from LLM"
-
     except Exception as e:
-        return False, traceback.format_exc()
+        # Log the error for debugging
+        print(f"Error in get_action_from_llm: {str(e)}")
+        print(f"Raw response (if available): {getattr(response, 'choices', [])}")
+        
+        # Provide a fallback response rather than returning an error
+        fallback_response = {"action": "chat", "body": "I encountered an issue processing your request. Could you try again?"}
+        return True, fallback_response
 
 # ----- MAIN ENDPOINT -----
 @app.route('/action', methods=['POST'])
@@ -314,154 +542,145 @@ def handle_action():
         return jsonify({"error": "Failed to process query", "details": result}), 500
 
     action = result.get('action')
-    known_actions = ['email', 'task', 'scrape', 'message', 'payment', 'chat']
+    known_actions = ['email', 'task', 'scrape', 'message', 'payment', 'chat', 'summarize', 'web_search', 'calendar']
 
     if not action or action not in known_actions:
         fallback_response = result.get('body', "I'm sorry, I didn't understand that. Can you please rephrase?")
         return jsonify({"message": fallback_response}), 200
 
-    if action == 'chat':
+    # Handle calendar action
+    if action == 'calendar':
+        meeting_data = result.get('meeting_data', {})
+        if not meeting_data:
+            return jsonify({"error": "No meeting details provided."}), 400
+        
+        success, response = add_calendar_event(meeting_data)
+        if success:
+            return jsonify({
+                "message": response['message'],
+                "event_details": response
+            }), 200
+        else:
+            return jsonify({"error": "Failed to schedule meeting.", "details": response}), 500
+
+    elif action == 'chat':
         chat_reply = result.get('body', "Hello! How can I help you?")
         return jsonify({"message": chat_reply}), 200
 
+    elif action == 'summarize':
+        url = result.get('url')
+        if not url:
+            return jsonify({"error": "No URL provided for summarization."}), 400
+
+        success, summary = scrape_and_summarize(url)
+        if success:
+            return jsonify({"message": summary, "summary": summary}), 200
+        else:
+            return jsonify({"error": "Failed to generate summary.", "details": summary}), 500
+
+    elif action == 'web_search':
+        search_query = result.get('query')
+        if not search_query:
+            return jsonify({"error": "No search query provided."}), 400
+
+        api_key = os.environ.get("SERPAPI_API_KEY")
+        if not api_key:
+            return jsonify({"error": "Missing SERPAPI_API_KEY environment variable."}), 500
+
+        success, search_results = perform_web_search(search_query, api_key)
+        if success:
+            # Format the search results as a readable message
+            results_message = f"Search results for '{search_query}':\n\n"
+            for idx, result_item in enumerate(search_results, 1):
+                results_message += f"{idx}. {result_item['title']}\n"
+                results_message += f"   {result_item['link']}\n"
+                results_message += f"   {result_item['snippet']}\n\n"
+            
+            return jsonify({
+                "message": results_message,  # Include formatted results in the message
+                "results": search_results     # Keep the raw results for UI processing
+            }), 200
+        else:
+            return jsonify({"error": "Failed to perform web search.", "details": search_results}), 500
+    
     elif action == 'email':
-        sub_action = result.get('sub_action', 'send')
         recipient = result.get('recipient')
-        subject = result.get('subject')
-        body = result.get('body') or "No body provided."
-        schedule_time = result.get('schedule_time')
-        attachment = result.get('attachment')
-        if not recipient or not subject or not body.strip():
-            return jsonify({"error": "Incomplete email details."}), 400
-        success, res = send_email(recipient, subject, body, schedule_time, attachment)
+        subject = result.get('subject', 'No Subject')
+        body = result.get('body', '')
+        
+        if not recipient:
+            return jsonify({"error": "No recipient provided for email."}), 400
+        
+        success, message = send_email(recipient, subject, body)
         if success:
-            return jsonify({"message": f"Email {sub_action} operation successful.", "result": res}), 200
+            return jsonify({"message": "Email sent successfully."}), 200
         else:
-            return jsonify({"error": "Email operation failed.", "details": res}), 500
-
+            return jsonify({"error": "Failed to send email.", "details": message}), 500
+    
     elif action == 'task':
-        # 1. Attempt to read 'operation'
-        operation = (result.get('operation') or '').lower()
-
-        # 2. Map synonyms to official ops
-        op_map = {
-            'createtask': 'create', 'add': 'create', 'new': 'create',
-            'readtask': 'read', 'get': 'read', 'show': 'read',
-            'updatetask': 'update', 'modify': 'update',
-            'deletetask': 'delete', 'remove': 'delete'
-        }
-        if operation in op_map:
-            operation = op_map[operation]
-
-        # 3. If STILL no recognized operation, guess one based on presence of fields
-        if operation not in ['create', 'read', 'update', 'delete']:
-            # If there's a "task_id" or "id" plus new fields => "update", 
-            # if there's a "task_id" or "id" with no new fields => "read", 
-            # if there's a "title" but no id => "create", 
-            # else default to "read" all
-            has_title = 'title' in result or ('data' in result and 'title' in result['data'])
-            has_description = 'description' in result or ('data' in result and 'description' in result['data'])
-            has_due_date = 'due_date' in result or ('data' in result and 'due_date' in result['data'])
-
-            # unify id or task_id into data_payload
-            data_payload = result.get('data', {})
-            # if top-level "task_id" or "id" not in data, copy it
-            for possible_id_key in ['task_id', 'taskId', 'id']:
-                if possible_id_key in result and 'id' not in data_payload:
-                    data_payload['id'] = result[possible_id_key]
-
-            # guess logic
-            if 'id' in data_payload:
-                if has_title or has_description or has_due_date:
-                    operation = 'update'
-                else:
-                    operation = 'read'
-            else:
-                if has_title:
-                    operation = 'create'
-                else:
-                    operation = 'read'
-
-            # 4. Prepare data payload (merging top-level if missing)
-            data_payload = result.get('data', {})
-            # unify top-level fields into data if absent
-            for possible_id_key in ['task_id', 'taskId', 'id']:
-                if possible_id_key in result and 'id' not in data_payload:
-                    data_payload['id'] = result[possible_id_key]
-            if 'title' in result and 'title' not in data_payload:
-                data_payload['title'] = result['title']
-            if 'description' in result and 'description' not in data_payload:
-                data_payload['description'] = result['description']
-            if 'due_date' in result and 'due_date' not in data_payload:
-                data_payload['due_date'] = result['due_date']
-
-            # 5. Execute the recognized operation
-            if operation == 'create':
-                success, res = create_task(data_payload)
-            elif operation == 'read':
-                success, res = read_task(data_payload)
-            elif operation == 'update':
-                success, res = update_task(data_payload)
-            elif operation == 'delete':
-                success, res = delete_task(data_payload)
-            else:
-                return jsonify({
-                    "error": "Invalid task operation specified.",
-                    "result": result
-                }), 400
-
-            if success:
-                return jsonify({"message": "Task operation successful.", "result": res}), 200
-            else:
-                return jsonify({"error": "Task operation failed.", "details": res}), 500
-
-    elif action == 'scrape':
-        target = result.get('target')
-        query_details = result.get('query')
-        if not target or not query_details:
-            return jsonify({"error": "Incomplete scraping details."}), 400
-        success, res = perform_scraping(target, query_details)
-        if success:
-            return jsonify({"message": "Scraping successful.", "result": res}), 200
+        task_action = result.get('task_action', 'create')
+        task_data = result.get('task_data', {})
+        
+        if task_action == 'create':
+            success, message = create_task(task_data)
+        elif task_action == 'read':
+            success, message = read_task(task_data)
+        elif task_action == 'update':
+            success, message = update_task(task_data)
+        elif task_action == 'delete':
+            success, message = delete_task(task_data)
         else:
-            return jsonify({"error": "Scraping failed.", "details": res}), 500
-
+            return jsonify({"error": f"Unknown task action: {task_action}"}), 400
+        
+        if success:
+            return jsonify({"message": "Task operation successful.", "result": message}), 200
+        else:
+            return jsonify({"error": "Task operation failed.", "details": message}), 500
+    
+    elif action == 'scrape':
+        query = result.get('query')
+        if not query:
+            return jsonify({"error": "No query provided for scraping."}), 400
+        
+        success, headlines = perform_scraping_news(query)
+        if success:
+            return jsonify({"message": "News scraped successfully.", "headlines": headlines}), 200
+        else:
+            return jsonify({"error": "Failed to scrape news.", "details": headlines}), 500
+    
     elif action == 'message':
         platform = result.get('platform')
         recipient = result.get('recipient')
-        message_text = result.get('message')
-        if not platform or not recipient or not message_text:
-            return jsonify({"error": "Incomplete messaging details."}), 400
-        success, res = send_message(platform, recipient, message_text)
+        message_text = result.get('message', '')
+        
+        if not platform:
+            return jsonify({"error": "No messaging platform specified."}), 400
+        if not recipient:
+            return jsonify({"error": "No recipient provided for message."}), 400
+        
+        success, message = send_message(platform, recipient, message_text)
         if success:
-            return jsonify({"message": "Messaging operation successful.", "result": res}), 200
+            return jsonify({"message": "Message sent successfully.", "details": message}), 200
         else:
-            return jsonify({"error": "Messaging operation failed.", "details": res}), 500
-
-    elif action == 'payment':
-        # fallback defaults if missing
-        amount = result.get('amount')
-        currency = result.get('currency') or "INR"
-        order_id = result.get('order_id') or "testOrder"
-        description = result.get('description') or "Simulated Payment"
-
-        # Must at least have an amount
-        if not amount:
-            return jsonify({"error": "Incomplete payment details."}), 400
-
-        success, res = process_payment(amount, currency, order_id, description)
-        if success:
-            # Overridden success message for test payments
-            return jsonify({
-                "message": "Simulated payment transfer successful, but it will not be credited in your account because it's a test payment",
-                "result": res
-            }), 200
-        else:
-            return jsonify({"error": "Payment processing failed.", "details": res}), 500
-    else:
-        fallback_response = result.get('body', "I'm sorry, I didn't understand that. Please try again.")
-        return jsonify({"message": fallback_response}), 200
+            return jsonify({"error": "Failed to send message.", "details": message}), 500
     
+    elif action == 'payment':
+        amount = result.get('amount')
+        currency = result.get('currency', 'USD')
+        order_id = result.get('order_id', 'order_' + str(hash(str(amount) + currency))[1:8])
+        description = result.get('description', 'Payment processed')
+        
+        if not amount:
+            return jsonify({"error": "No amount provided for payment."}), 400
+        
+        success, message = process_payment(amount, currency, order_id, description)
+        if success:
+            return jsonify({"message": "Payment processed successfully.", "details": message}), 200
+        else:
+            return jsonify({"error": "Failed to process payment.", "details": message}), 500
+    
+    # Fallback for unknown actions
+    return jsonify({"error": f"Action '{action}' is recognized but not implemented."}), 501
 
 # ----- RUN APPLICATION -----
 if __name__ == '__main__':
