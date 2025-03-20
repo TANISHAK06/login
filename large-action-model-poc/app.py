@@ -285,18 +285,31 @@ def send_whatsapp_message(recipient, message_text):
     account_sid = os.environ.get('TWILIO_ACCOUNT_SID')
     auth_token = os.environ.get('TWILIO_AUTH_TOKEN')
     from_whatsapp_number = os.environ.get('TWILIO_WHATSAPP_NUMBER')
+    
     if not (account_sid and auth_token and from_whatsapp_number):
         return False, "Missing Twilio configuration in environment variables."
+    
     client = Client(account_sid, auth_token)
     try:
+        # Format the recipient number correctly
+        if not recipient.startswith('whatsapp:'):
+            to_number = f'whatsapp:{recipient}'
+        else:
+            to_number = recipient
+            
         message = client.messages.create(
             body=message_text,
-            from_=from_whatsapp_number,
-            to=f'whatsapp:{recipient}'
+            from_=f'whatsapp:{from_whatsapp_number}' if not from_whatsapp_number.startswith('whatsapp:') else from_whatsapp_number,
+            to=to_number
         )
-        return True, f"WhatsApp message sent with SID {message.sid}"
+        
+        # Check for potential error flags in the message status
+        if message.status in ['failed', 'undelivered']:
+            return False, f"Message creation succeeded but delivery failed. Status: {message.status}, Error: {message.error_message}"
+        
+        return True, f"WhatsApp message sent with SID {message.sid}, Status: {message.status}"
     except Exception as e:
-        return False, str(e)
+        return False, f"Twilio Error: {str(e)}"
 
 def send_message(platform, recipient, message_text):
     if platform.lower() == "whatsapp":
@@ -318,23 +331,48 @@ def get_calendar_service():
     token_path = os.environ.get('GOOGLE_TOKEN_PATH', 'token.json')
     credentials_path = os.environ.get('GOOGLE_CREDENTIALS_PATH', 'credentials.json')
     
-    # Check if token already exists
+    # Check if token exists
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_info(json.loads(open(token_path).read()), SCOPES)
     
-    # If there are no valid credentials, let the user log in
+    # If credentials are invalid or missing
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                # If refresh fails, force re-authentication
+                creds = None
+                # Optionally delete the token file if it exists but is invalid
+                if os.path.exists(token_path):
+                    os.remove(token_path)
+                return False, f"Credentials refresh failed: {str(e)}. Please re-authenticate."
+        
+        # If we need to authenticate from scratch
+        if not creds:
             if not os.path.exists(credentials_path):
                 return False, "Missing Google Calendar credentials file."
-            flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
-            creds = flow.run_local_server(port=0)
+            
+            try:
+                # For server environments, use a redirect approach
+                flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
+                
+                # Generate the authorization URL
+                auth_url, _ = flow.authorization_url(access_type='offline', include_granted_scopes='true')
+                print(f"Please visit this URL to authenticate: {auth_url}")
+                
+                # Return the auth URL to the frontend
+                return False, {"auth_required": True, "auth_url": auth_url}
+                
+                # For local testing, uncomment:
+                # creds = flow.run_local_server(port=0)
+            except Exception as e:
+                return False, f"Authentication failed: {str(e)}"
         
-        # Save the credentials for the next run
-        with open(token_path, 'w') as token:
-            token.write(creds.to_json())
+        # Save the credentials for next run if we have valid creds
+        if creds:
+            with open(token_path, 'w') as token:
+                token.write(creds.to_json())
     
     return True, build('calendar', 'v3', credentials=creds)
 
@@ -347,6 +385,7 @@ def parse_meeting_details(meeting_data):
     time_str = meeting_data.get('time', '')
     duration_str = meeting_data.get('duration', '1 hour')
     attendees_list = meeting_data.get('attendees', [])
+    phone_numbers = meeting_data.get('phone_numbers', [])  # New: Extract phone numbers
     
     # Parse date and time
     try:
@@ -386,17 +425,26 @@ def parse_meeting_details(meeting_data):
             'location': location,
             'start_time': start_time,
             'end_time': end_time,
-            'attendees': attendees_list
+            'attendees': attendees_list,
+            'phone_numbers': phone_numbers  # New: Include phone numbers in the result
         }
     except Exception as e:
         return False, f"Failed to parse meeting details: {str(e)}"
+
+
 def add_calendar_event(meeting_data):
     """Add a calendar event using Google Calendar API."""
     try:
         # Get calendar service
-        success, service = get_calendar_service()
+        success, service_or_error = get_calendar_service()
         if not success:
-            return False, service  # Error message
+            return False, service_or_error  # Return error message or auth info
+        
+        # If auth is required, return the auth info
+        if isinstance(service_or_error, dict) and service_or_error.get('auth_required'):
+            return False, service_or_error
+        
+        service = service_or_error  # If successful, service_or_error contains the service
         
         # Parse meeting details
         success, details = parse_meeting_details(meeting_data)
@@ -413,11 +461,11 @@ def add_calendar_event(meeting_data):
             'description': details['description'],
             'start': {
                 'dateTime': details['start_time'].isoformat(),
-                'timeZone': 'America/New_York',  # Adjust as needed
+                'timeZone': 'IST',  # Adjust as needed
             },
             'end': {
                 'dateTime': details['end_time'].isoformat(),
-                'timeZone': 'America/New_York',  # Adjust as needed
+                'timeZone': 'IST',  # Adjust as needed
             },
             'attendees': attendees,
             'reminders': {
@@ -429,20 +477,78 @@ def add_calendar_event(meeting_data):
         calendar_id = 'primary'  # Use primary calendar
         event = service.events().insert(calendarId=calendar_id, body=event).execute()
         
+        # Create meeting details message
+        meeting_details = (
+            f"Meeting: {details['title']}\n"
+            f"Description: {details['description']}\n"
+            f"Time: {details['start_time'].strftime('%Y-%m-%d %H:%M')} to {details['end_time'].strftime('%H:%M')}\n"
+            f"Location: {details['location']}\n"
+            f"Meeting Link: {event.get('htmlLink', 'No link available')}"
+        )
+        
         # Send email to attendees
         if attendees:
             subject = f"Invitation: {details['title']}"
-            body = f"You have been invited to a meeting:\n\nTitle: {details['title']}\nDescription: {details['description']}\nTime: {details['start_time'].strftime('%Y-%m-%d %H:%M')} to {details['end_time'].strftime('%H:%M')}\nLocation: {details['location']}\n\nMeeting Link: {event.get('htmlLink')}"
+            body = f"You have been invited to a meeting:\n\n{meeting_details}"
+            
             for attendee in attendees:
                 send_email(attendee['email'], subject, body)
+        
+        # Send WhatsApp messages to phone numbers
+        whatsapp_results = []
+        if details.get('phone_numbers'):
+            for phone in details['phone_numbers']:
+                # Format the message for WhatsApp
+                whatsapp_message = f"📅 Meeting Invitation 📅\n\n{meeting_details}"
+                
+                # Send WhatsApp message
+                success, message = send_whatsapp_message(phone, whatsapp_message)
+                whatsapp_results.append({
+                    'phone': phone,
+                    'success': success,
+                    'message': message
+                })
         
         return True, {
             'message': f"Meeting '{details['title']}' scheduled successfully.",
             'event_id': event.get('id'),
-            'event_link': event.get('htmlLink')
+            'event_link': event.get('htmlLink'),
+            'whatsapp_notifications': whatsapp_results
         }
     except Exception as e:
         return False, f"Failed to add calendar event: {str(e)}"
+# ----- OAUTH CALLBACK ROUTE -----
+@app.route('/oauth2callback')
+def oauth2callback():
+    """Handle the OAuth2 callback from Google."""
+    credentials_path = os.environ.get('GOOGLE_CREDENTIALS_PATH', 'credentials.json')
+    token_path = os.environ.get('GOOGLE_TOKEN_PATH', 'token.json')
+    
+    if not os.path.exists(credentials_path):
+        return jsonify({"error": "Missing credentials file"}), 500
+    
+    try:
+        flow = InstalledAppFlow.from_client_secrets_file(
+            credentials_path,
+            SCOPES,
+            redirect_uri=request.base_url
+        )
+        
+        # Use the authorization code from the callback
+        code = request.args.get('code')
+        if not code:
+            return jsonify({"error": "No authorization code provided"}), 400
+        
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        
+        # Save the credentials
+        with open(token_path, 'w') as token:
+            token.write(creds.to_json())
+        
+        return jsonify({"message": "Successfully authenticated with Google Calendar!"}), 200
+    except Exception as e:
+        return jsonify({"error": f"Authentication failed: {str(e)}"}), 500
 
 # ----- GROQ INTEGRATION -----
 def get_action_from_llm(query):
@@ -476,9 +582,11 @@ def get_action_from_llm(query):
                 "For chat: {\"action\": \"chat\", \"body\": \"I'm here to help!\"}\n"
                 "For task: {\"action\": \"task\", \"task_action\": \"create\", \"task_data\": {\"title\": \"Meeting\", \"description\": \"Team meeting\"}}\n"
                 "For summarize: {\"action\": \"summarize\", \"url\": \"https://example.com\"}\n"
-                "For calendar: {\"action\": \"calendar\", \"meeting_data\": {\"title\": \"Team Meeting\", \"date\": \"2025-03-28\", \"time\": \"10:00\", \"duration\": \"1 hour\", \"attendees\": [\"colleague@example.com\"]}}\n\n"
-
-                "For calendar actions, extract as much information as possible including title, date, time, duration, location, description, and attendees if available. If date or time is specified in a natural way like 'tomorrow at 2pm' or '28th March', parse and convert it to proper date format.\n\n"
+                "For calendar: {\"action\": \"calendar\", \"meeting_data\": {\"title\": \"Team Meeting\", \"date\": \"2025-03-28\", \"time\": \"10:00\", \"duration\": \"1 hour\", \"attendees\": [\"colleague@example.com\"], \"phone_numbers\": [\"+1234567890\"]}}\n\n"
+                "For message: {\"action\": \"message\", \"platform\": \"whatsapp\", \"recipient\": \"+1234567890\", \"message\": \"Hello there\"}\n"
+                "For calendar actions, extract as much information as possible including title, date, time, duration, location, description, attendees, and phone numbers if available. Phone numbers should be separate from attendees and will be used to send WhatsApp notifications. If date or time is specified in a natural way like 'tomorrow at 2pm' or '28th March', parse and convert it to proper date format. IF DESCRIPTION IS NOT DEFINED CREATE ONE FROM THE TITLE ITSELF AND LOCATION WILL BE REMOTE IF NOT MENTIONED BY THE USER.\n\n"
+                
+                "IMPORTANT: For calendar actions, look for phone numbers in the query and extract them into the phone_numbers array. Common formats include '+1234567890', '123-456-7890', or even mentions like 'send WhatsApp to 1234567890'.\n\n"
                 
                 "ALWAYS return ONLY valid JSON with no additional text, explanations, or formatting."
             )
@@ -561,6 +669,13 @@ def handle_action():
                 "event_details": response
             }), 200
         else:
+            # Check if authentication is required
+            if isinstance(response, dict) and response.get('auth_required'):
+                return jsonify({
+                    "status": "auth_required",
+                    "auth_url": response.get('auth_url'),
+                    "message": "Google Calendar authentication required. Please visit the authentication URL."
+                }), 202  # 202 Accepted indicates the request was valid but needs further action
             return jsonify({"error": "Failed to schedule meeting.", "details": response}), 500
 
     elif action == 'chat':
