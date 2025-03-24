@@ -31,6 +31,7 @@ const MessageInput = ({
   }, [error]);
 
   const handleVoiceSearch = () => {
+    setVoiceEnabled(false);
     if ("webkitSpeechRecognition" in window) {
       const recognition = new window.webkitSpeechRecognition();
       recognition.continuous = false;

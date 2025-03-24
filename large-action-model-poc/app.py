@@ -23,6 +23,9 @@ from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from email.mime.text import MIMEText
+import base64
 
 # Load environment variables from .env file
 load_dotenv()
@@ -37,7 +40,8 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 # OAuth 2.0 scopes for Google Calendar
-SCOPES = ['https://www.googleapis.com/auth/calendar']
+SCOPES = ['https://www.googleapis.com/auth/calendar', 
+          'https://www.googleapis.com/auth/gmail.modify']
 
 # ----- MODELS -----
 class Task(db.Model):
@@ -234,7 +238,7 @@ def scrape_and_summarize(url):
         ]
 
         response = client.chat.completions.create(
-            model="mixtral-8x7b-32768",  # Replace with the appropriate Groq model
+            model="llama3-70b-8192",  
             messages=messages,
             max_tokens=300,
             temperature=0.0,
@@ -331,51 +335,43 @@ def get_calendar_service():
     token_path = os.environ.get('GOOGLE_TOKEN_PATH', 'token.json')
     credentials_path = os.environ.get('GOOGLE_CREDENTIALS_PATH', 'credentials.json')
     
-    # Check if token exists
+    # Check if token already exists
     if os.path.exists(token_path):
-        creds = Credentials.from_authorized_user_info(json.loads(open(token_path).read()), SCOPES)
+        try:
+            creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+        except Exception as e:
+            print(f"Error loading credentials: {e}")
+            creds = None
     
-    # If credentials are invalid or missing
+    # If there are no valid credentials, let the user log in
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
             except Exception as e:
-                # If refresh fails, force re-authentication
+                print(f"Error refreshing token: {e}")
                 creds = None
-                # Optionally delete the token file if it exists but is invalid
-                if os.path.exists(token_path):
-                    os.remove(token_path)
-                return False, f"Credentials refresh failed: {str(e)}. Please re-authenticate."
-        
-        # If we need to authenticate from scratch
-        if not creds:
+        else:
             if not os.path.exists(credentials_path):
                 return False, "Missing Google Calendar credentials file."
-            
             try:
-                # For server environments, use a redirect approach
                 flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
-                
-                # Generate the authorization URL
-                auth_url, _ = flow.authorization_url(access_type='offline', include_granted_scopes='true')
-                print(f"Please visit this URL to authenticate: {auth_url}")
-                
-                # Return the auth URL to the frontend
-                return False, {"auth_required": True, "auth_url": auth_url}
-                
-                # For local testing, uncomment:
-                # creds = flow.run_local_server(port=0)
+                creds = flow.run_local_server(port=0, open_browser=True)  # Ensure the browser opens for OAuth
             except Exception as e:
-                return False, f"Authentication failed: {str(e)}"
+                print(f"Error during OAuth flow: {e}")
+                return False, f"OAuth flow failed: {str(e)}"
         
-        # Save the credentials for next run if we have valid creds
-        if creds:
-            with open(token_path, 'w') as token:
-                token.write(creds.to_json())
+        # Save the credentials for the next run
+        with open(token_path, 'w') as token:
+            token.write(creds.to_json())
     
-    return True, build('calendar', 'v3', credentials=creds)
-
+    try:
+        service = build('calendar', 'v3', credentials=creds )
+        return True, service
+    except Exception as e:
+        print(f"Error building calendar service: {e}")
+        return False, f"Failed to build calendar service: {str(e)}"
+    
 def parse_meeting_details(meeting_data):
     """Parse meeting details from calendar request data."""
     title = meeting_data.get('title', 'Untitled Meeting')
@@ -549,6 +545,192 @@ def oauth2callback():
         return jsonify({"message": "Successfully authenticated with Google Calendar!"}), 200
     except Exception as e:
         return jsonify({"error": f"Authentication failed: {str(e)}"}), 500
+    
+def get_gmail_service():
+    """Get authenticated Gmail service using the same credentials as Calendar."""
+    token_path = os.environ.get('GOOGLE_TOKEN_PATH', 'token.json')
+    
+    # Check if token exists and load credentials directly
+    if os.path.exists(token_path):
+        try:
+            with open(token_path, 'r') as token_file:
+                creds_info = json.loads(token_file.read())
+                creds = Credentials.from_authorized_user_info(creds_info, SCOPES)
+                
+                # Verify credentials are valid
+                if not creds.valid:
+                    if creds.expired and creds.refresh_token:
+                        creds.refresh(Request())
+                    else:
+                        return False, "Credentials expired and cannot be refreshed"
+                
+                # Build Gmail service with the credentials
+                gmail_service = build('gmail', 'v1', credentials=creds)
+                return True, gmail_service
+        except Exception as e:
+            return False, f"Failed to create Gmail service: {str(e)}"
+    else:
+        # If no token exists, we need authentication
+        credentials_path = os.environ.get('GOOGLE_CREDENTIALS_PATH', 'credentials.json')
+        if not os.path.exists(credentials_path):
+            return False, "Missing Google credentials file."
+            
+        try:
+            flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
+            auth_url, _ = flow.authorization_url(access_type='offline', include_granted_scopes='true')
+            return False, {"auth_required": True, "auth_url": auth_url}
+        except Exception as e:
+            return False, f"Authentication failed: {str(e)}"
+def find_latest_email(sender_email):
+    """Find the most recent email from the specified sender."""
+    try:
+        # Get Gmail service
+        success, service_or_error = get_gmail_service()
+        if not success:
+            return False, service_or_error
+        
+        service = service_or_error
+        
+        # Search for emails from the sender
+        query = f"from:{sender_email}"
+        result = service.users().messages().list(userId='me', q=query, maxResults=1).execute()
+        messages = result.get('messages', [])
+        
+        if not messages:
+            return False, f"No emails found from {sender_email}"
+        
+        # Get the most recent email
+        msg_id = messages[0]['id']
+        message = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
+        
+        # Extract subject and body
+        headers = message['payload']['headers']
+        subject = next((header['value'] for header in headers if header['name'].lower() == 'subject'), 'No Subject')
+        thread_id = message['threadId']
+        
+        # Extract the body (might be in plain text or HTML)
+        body = ""
+        if 'parts' in message['payload']:
+            for part in message['payload']['parts']:
+                if part['mimeType'] == 'text/plain':
+                    body = base64.urlsafe_b64decode(part['body']['data']).decode('utf-8')
+                    break
+        elif 'body' in message['payload'] and 'data' in message['payload']['body']:
+            body = base64.urlsafe_b64decode(message['payload']['body']['data']).decode('utf-8')
+        
+        return True, {
+            'id': msg_id,
+            'thread_id': thread_id,
+            'subject': subject,
+            'body': body,
+            'sender': sender_email
+        }
+    except Exception as e:
+        return False, f"Error finding email: {str(e)}"
+
+def generate_email_reply(email_content):
+    """Generate an appropriate reply using the LLM."""
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        return False, "Missing GROQ_API_KEY environment variable."
+    
+    client = Groq(api_key=groq_api_key)
+    
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an intelligent assistant that drafts professional and appropriate email replies. "
+                "Consider the context, tone, and content of the original email. "
+                "Keep your responses concise, clear, and professional. "
+                "If the original email asks questions, make sure to address them. "
+                "Use a formal but friendly tone unless the original email is casual."
+                "Don't Include anything else apart from the Email like don't include Here's a potenial reply or anything and in salutation always use best regards"
+            )
+        },
+        {
+            "role": "user", 
+            "content": f"Please draft a reply to the following email:\n\n{email_content}"
+        }
+    ]
+    
+    try:
+        response = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=messages,
+            max_tokens=500,
+            temperature=0.7
+        )
+        
+        reply_content = response.choices[0].message.content.strip()
+        return True, reply_content
+    except Exception as e:
+        return False, f"Failed to generate email reply: {str(e)}"
+
+def send_email_reply(email_data, reply_content):
+    """Send a reply to the specified email."""
+    try:
+        # Get Gmail service
+        success, service_or_error = get_gmail_service()
+        if not success:
+            return False, service_or_error
+        
+        service = service_or_error
+        
+        # Create the message
+        message = MIMEText(reply_content)
+        message['To'] = email_data['sender']
+        message['Subject'] = f"Re: {email_data['subject']}"
+        message['In-Reply-To'] = email_data['id']
+        message['References'] = email_data['id']
+        
+        # Encode the message
+        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        
+        # Create the draft message
+        draft = {
+            'message': {
+                'raw': encoded_message,
+                'threadId': email_data['thread_id']
+            }
+        }
+        
+        # Send the message
+        sent_message = service.users().messages().send(userId='me', body={'raw': encoded_message, 'threadId': email_data['thread_id']}).execute()
+        
+        return True, {
+            'message_id': sent_message['id'],
+            'thread_id': sent_message['threadId'],
+            'reply_content': reply_content
+        }
+    except Exception as e:
+        return False, f"Failed to send email reply: {str(e)}"
+
+def handle_email_reply(sender_email):
+    """Handle the full email reply process."""
+    try:
+        # Find the latest email
+        success, email_data = find_latest_email(sender_email)
+        if not success:
+            return False, email_data
+        
+        # Generate a reply
+        success, reply_content = generate_email_reply(email_data['body'])
+        if not success:
+            return False, reply_content
+        
+        # Send the reply
+        success, reply_result = send_email_reply(email_data, reply_content)
+        if not success:
+            return False, reply_result
+        
+        return True, {
+            'message': f"Successfully replied to email from {sender_email}",
+            'email_subject': email_data['subject'],
+            'reply_content': reply_content
+        }
+    except Exception as e:
+        return False, f"Failed to handle email reply: {str(e)}"
 
 # ----- GROQ INTEGRATION -----
 def get_action_from_llm(query):
@@ -562,9 +744,8 @@ def get_action_from_llm(query):
         {
             "role": "system",
             "content": (
-                "You are an AI assistant that classifies user requests into specific actions. "
-                "You must respond with ONLY a valid JSON object containing action details. "
-                "Never include any explanations, markdown, or text outside the JSON object.\n\n"
+                "You are an exceptionally intelligent, human-like, highly intuitive, and context-aware AI assistant specialized in deeply understanding the intent behind user requests and responding with exceptionally realistic, professional, empathetic, nuanced, and contextually accurate actions. "
+                 "Your responses should be indistinguishable from those crafted by a thoughtful human being, carefully considering subtle emotional nuances and interpersonal relationships. Respond ONLY with a valid JSON object containing thoroughly detailed and context-sensitive action data. Never include any explanations, markdown, or text outside the JSON object.\n\n"
                 "Available actions:\n"
                 "1) email - When the user wants to send an email\n"
                 "2) task - When the user wants to manage tasks (create, read, update, delete)\n"
@@ -574,21 +755,34 @@ def get_action_from_llm(query):
                 "6) chat - For normal conversation\n"
                 "7) summarize - For summarizing a webpage\n"
                 "8) web_search - For performing a web search\n"
-                "9) calendar - When the user wants to schedule a meeting or event\n\n"
-                
+                "9) calendar - When the user wants to schedule a meeting or event\n"
+                "10) email_reply - When the user wants to reply to an email from a specific sender\n\n"
+                "Intelligent Guidelines:\n"
+        "- Email: Automatically craft realistic, highly personalized, and nuanced emails based on inferred interpersonal context, adjusting tone, language, and level of formality according to the recipient's relationship with the sender. Precisely infer appropriate salutations, subjects, and closing remarks.\n"
+        "- Task: Precisely manage task actions (create, update, read, delete), intuitively understanding user intent, urgency, and priority, and include actionable, clear descriptions.\n"
+        "- Scrape: Intelligently determine exactly what information the user needs and provide detailed extraction.\n"
+        "- Message: Compose exceptionally realistic and emotionally nuanced WhatsApp or Telegram messages, reflecting genuine human warmth, empathy, casualness, humor, or professionalism based on context.\n"
+        "- Payment: Clearly and accurately interpret transaction intent, providing explicit recipient details, amounts, currencies, and contextually appropriate descriptions.\n"
+        "- Chat: Engage in authentic, human-like conversations, showcasing deep emotional intelligence, genuine empathy, sensitivity, warmth, humor, or seriousness, depending entirely on context.\n"
+        "- Summarize: Provide succinct and intelligent summaries, skillfully capturing underlying nuances and the essence of provided content.\n"
+        "- Web Search: Conduct highly precise, nuanced web searches accurately tailored to the exact intent and underlying context of the user's request.\n"
+        "- Calendar: Accurately parse and intelligently convert natural language dates and times, proactively detailing comprehensive event information including nuanced contextual data such as location, attendees, duration, and descriptions (if not given create by your own intelligence), implicitly or explicitly stated.\n"
+        "- Email Reply: Intelligently identify when a user wants to reply to an email from a specific sender, extracting the sender's email address from the query. Be able to understand requests like 'reply to the email from john@example.com' or 'respond to the message I got from Sarah (sarah@company.com).'\n\n"
                 "Example formats:\n"
                 "For email: {\"action\": \"email\", \"recipient\": \"email@example.com\", \"subject\": \"Meeting\", \"body\": \"Let's meet tomorrow\"}\n"
                 "For web search: {\"action\": \"web_search\", \"query\": \"latest news\"}\n"
                 "For chat: {\"action\": \"chat\", \"body\": \"I'm here to help!\"}\n"
                 "For task: {\"action\": \"task\", \"task_action\": \"create\", \"task_data\": {\"title\": \"Meeting\", \"description\": \"Team meeting\"}}\n"
                 "For summarize: {\"action\": \"summarize\", \"url\": \"https://example.com\"}\n"
-                "For calendar: {\"action\": \"calendar\", \"meeting_data\": {\"title\": \"Team Meeting\", \"date\": \"2025-03-28\", \"time\": \"10:00\", \"duration\": \"1 hour\", \"attendees\": [\"colleague@example.com\"], \"phone_numbers\": [\"+1234567890\"]}}\n\n"
+                "For calendar: {\"action\": \"calendar\", \"meeting_data\": {\"title\": \"Team Meeting\", \"date\": \"2025-03-28\", \"time\": \"10:00\", \"duration\": \"1 hour\", \"attendees\": [\"colleague@example.com\"], \"phone_numbers\": [\"+1234567890\"]}}\n"
                 "For message: {\"action\": \"message\", \"platform\": \"whatsapp\", \"recipient\": \"+1234567890\", \"message\": \"Hello there\"}\n"
-                "For calendar actions, extract as much information as possible including title, date, time, duration, location, description, attendees, and phone numbers if available. Phone numbers should be separate from attendees and will be used to send WhatsApp notifications. If date or time is specified in a natural way like 'tomorrow at 2pm' or '28th March', parse and convert it to proper date format. IF DESCRIPTION IS NOT DEFINED CREATE ONE FROM THE TITLE ITSELF AND LOCATION WILL BE REMOTE IF NOT MENTIONED BY THE USER.\n\n"
+                "For email_reply: {\"action\": \"email_reply\", \"sender_email\": \"john@example.com\"}\n"
+                "For calendar actions, extract as much information as possible including title, date, time, duration, location, description, attendees, and phone numbers if available. Phone numbers should be separate from attendees and will be used to send WhatsApp notifications. If date or time is specified in a natural way like 'tomorrow at 2pm' or '28th March', parse and convert it to proper date format. IF DESCRIPTION IS NOT DEFINED CREATE ONE FROM THE TITLE ITSELF USING YOUR OWN INTELLIGENCE DON'T JUST COPY THE AND LOCATION WILL BE REMOTE IF NOT MENTIONED BY THE USER.\n\n"
                 
                 "IMPORTANT: For calendar actions, look for phone numbers in the query and extract them into the phone_numbers array. Common formats include '+1234567890', '123-456-7890', or even mentions like 'send WhatsApp to 1234567890'.\n\n"
-                
-                "ALWAYS return ONLY valid JSON with no additional text, explanations, or formatting."
+                "IMPORTANT: For email_reply actions, extract the sender's email address from the query. Look for phrases like 'reply to email from [email]', 'respond to [email]', etc.\n\n"
+                "IMPORTANT: If someone asks for your name like Hey what's your name, what should i call you, then remeber that your name is Teliolabs POC Testing LAM '.\n\n"
+                "ALWAYS return ONLY deeply intuitive, context-aware, realistic, emotionally intelligent, and comprehensive JSON responses without additional explanations, markdown, or formatting"
             )
         },
         {"role": "user", "content": f'Query: "{query}"'}
@@ -596,12 +790,12 @@ def get_action_from_llm(query):
 
     try:
         response = client.chat.completions.create(
-            model="mixtral-8x7b-32768",
+            model="llama3-70b-8192",
             messages=messages,
             max_tokens=300,
             temperature=0.0,
             top_p=1,
-            response_format={"type": "json_object"}  # Force JSON response format
+            response_format={"type": "json_object"}  
         )
 
         text = response.choices[0].message.content.strip()
@@ -650,14 +844,30 @@ def handle_action():
         return jsonify({"error": "Failed to process query", "details": result}), 500
 
     action = result.get('action')
-    known_actions = ['email', 'task', 'scrape', 'message', 'payment', 'chat', 'summarize', 'web_search', 'calendar']
+    known_actions = ['email', 'task', 'scrape', 'message', 'payment', 'chat', 'summarize', 'web_search', 'calendar', 'email_reply']
 
     if not action or action not in known_actions:
         fallback_response = result.get('body', "I'm sorry, I didn't understand that. Can you please rephrase?")
         return jsonify({"message": fallback_response}), 200
-
+    
+    if action == 'email_reply':
+        sender_email = result.get('sender_email')
+        if not sender_email:
+            return jsonify({"error": "No sender email provided."}), 400
+        
+        success, reply_result = handle_email_reply(sender_email)
+        if success:
+            return jsonify({
+                "message": reply_result['message'],
+                "details": {
+                    "subject": reply_result['email_subject'],
+                    "reply": reply_result['reply_content']
+                }
+            }), 200
+        else:
+            return jsonify({"error": "Failed to reply to email.", "details": reply_result}), 500
     # Handle calendar action
-    if action == 'calendar':
+    elif action == 'calendar':
         meeting_data = result.get('meeting_data', {})
         if not meeting_data:
             return jsonify({"error": "No meeting details provided."}), 400
