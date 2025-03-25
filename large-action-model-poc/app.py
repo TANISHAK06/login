@@ -26,30 +26,30 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from email.mime.text import MIMEText
 import base64
-
+ 
 # Load environment variables from .env file
 load_dotenv()
-
+ 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*", "allow_headers": "*", "expose_headers": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]}})
-
+ 
 # Use MySQL or fallback to SQLite
 db_uri = os.environ.get("MYSQL_URI", "sqlite:///poc.db")
 app.config['SQLALCHEMY_DATABASE_URI'] = db_uri
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
-
+ 
 # OAuth 2.0 scopes for Google Calendar
-SCOPES = ['https://www.googleapis.com/auth/calendar', 
+SCOPES = ['https://www.googleapis.com/auth/calendar',
           'https://www.googleapis.com/auth/gmail.modify']
-
+ 
 # ----- MODELS -----
 class Task(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(100), nullable=False)  # required
     description = db.Column(db.Text)
     due_date = db.Column(db.String(50))
-
+ 
     def as_dict(self):
         return {
             "id": self.id,
@@ -57,24 +57,35 @@ class Task(db.Model):
             "description": self.description,
             "due_date": self.due_date
         }
-
+ 
+# ------ Remember Chat History --------------#
+ 
+class ChatHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(50))
+    role = db.Column(db.String(20))  # "user" or "assistant"
+    message = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+ 
+ 
+ 
 # ----- UTILITY FUNCTIONS -----
-
+ 
 def send_email(recipient, subject, body, schedule_time=None, attachment=None):
     sender_email = os.environ.get('SENDER_EMAIL')
     sender_password = os.environ.get('SENDER_PASSWORD')
     smtp_server = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
     smtp_port = int(os.environ.get('SMTP_PORT', 587))
-    
+   
     if not all([sender_email, sender_password]):
         return False, "Missing email configuration in environment variables."
-
+ 
     message = MIMEMultipart()
     message['From'] = sender_email
     message['To'] = recipient
     message['Subject'] = subject
     message.attach(MIMEText(body, 'plain'))
-
+ 
     if attachment:
         try:
             with open(attachment, 'rb') as file:
@@ -86,7 +97,7 @@ def send_email(recipient, subject, body, schedule_time=None, attachment=None):
             message.attach(part)
         except Exception as e:
             return False, f"Attachment error: {e}"
-
+ 
     try:
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
@@ -95,9 +106,9 @@ def send_email(recipient, subject, body, schedule_time=None, attachment=None):
         return True, "Email sent successfully."
     except Exception as e:
         return False, str(e)
-
+ 
 # ----- CRUD for Task Management -----
-
+ 
 def create_task(data):
     title = data.get('title')
     if not title or title.strip() == "":
@@ -114,7 +125,7 @@ def create_task(data):
     except Exception as e:
         db.session.rollback()
         return False, str(e)
-
+ 
 def read_task(data):
     task_id = data.get('id')
     if task_id:
@@ -131,7 +142,7 @@ def read_task(data):
         # read all tasks
         tasks = Task.query.all()
         return True, [t.as_dict() for t in tasks]
-
+ 
 def update_task(data):
     task_id = data.get('id')
     if not task_id:
@@ -158,7 +169,7 @@ def update_task(data):
     except Exception as e:
         db.session.rollback()
         return False, str(e)
-
+ 
 def delete_task(data):
     task_id = data.get('id')
     if not task_id:
@@ -177,7 +188,7 @@ def delete_task(data):
     except Exception as e:
         db.session.rollback()
         return False, str(e)
-
+ 
 # ----- Web Scraping (News) -----
 def perform_scraping_news(query_details):
     api_key = os.environ.get("NEWSAPI_KEY")
@@ -203,7 +214,7 @@ def perform_scraping_news(query_details):
         return True, headlines[:10]
     except Exception as e:
         return False, str(e)
-
+ 
 # ----- Web Scraping for Summarization -----
 def scrape_and_summarize(url):
     try:
@@ -211,22 +222,22 @@ def scrape_and_summarize(url):
         groq_api_key = os.getenv("GROQ_API_KEY")
         if not groq_api_key:
             return False, "Missing GROQ_API_KEY environment variable."
-            
+           
         # Fetch the webpage content
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
         response = requests.get(url, headers=headers)
         response.raise_for_status()  # Raise an error for bad status codes
-
+ 
         # Parse the HTML content
         soup = BeautifulSoup(response.text, 'html.parser')
-
+ 
         # Extract text from the webpage
         text = " ".join([p.get_text() for p in soup.find_all('p')])  # Extract text from <p> tags
         if not text:
             return False, "No text found on the webpage."
-
+ 
         # Summarize the text using the LLM
         client = Groq(api_key=groq_api_key)
         messages = [
@@ -236,7 +247,7 @@ def scrape_and_summarize(url):
             },
             {"role": "user", "content": f"Summarize this text: {text[:9000]}"}  # Limit input to 10000 characters
         ]
-
+ 
         response = client.chat.completions.create(
             model="llama3-70b-8192",  
             messages=messages,
@@ -244,15 +255,15 @@ def scrape_and_summarize(url):
             temperature=0.0,
             top_p=1,
         )
-
+ 
         summary = response.choices[0].message.content.strip()
         return True, summary
-
+ 
     except requests.RequestException as e:
         return False, f"Failed to fetch the webpage: {str(e)}"
     except Exception as e:
         return False, f"An error occurred: {str(e)}"
-
+ 
 # ----- Web Search using SerpApi -----
 def perform_web_search(query, api_key):
     """
@@ -263,12 +274,12 @@ def perform_web_search(query, api_key):
         "api_key": api_key,  # SerpApi API key
         "engine": "google"  # Use Google as the search engine
     }
-
+ 
     try:
         response = requests.get("https://serpapi.com/search", params=params)
         response.raise_for_status()  # Raise an error for bad status codes
         data = response.json()
-
+ 
         # Extract and format search results
         if "organic_results" in data:
             results = []
@@ -283,16 +294,16 @@ def perform_web_search(query, api_key):
             return False, "No search results found."
     except Exception as e:
         return False, str(e)
-
+ 
 # ----- Messaging (WhatsApp/Telegram) -----
 def send_whatsapp_message(recipient, message_text):
     account_sid = os.environ.get('TWILIO_ACCOUNT_SID')
     auth_token = os.environ.get('TWILIO_AUTH_TOKEN')
     from_whatsapp_number = os.environ.get('TWILIO_WHATSAPP_NUMBER')
-    
+   
     if not (account_sid and auth_token and from_whatsapp_number):
         return False, "Missing Twilio configuration in environment variables."
-    
+   
     client = Client(account_sid, auth_token)
     try:
         # Format the recipient number correctly
@@ -300,21 +311,21 @@ def send_whatsapp_message(recipient, message_text):
             to_number = f'whatsapp:{recipient}'
         else:
             to_number = recipient
-            
+           
         message = client.messages.create(
             body=message_text,
             from_=f'whatsapp:{from_whatsapp_number}' if not from_whatsapp_number.startswith('whatsapp:') else from_whatsapp_number,
             to=to_number
         )
-        
+       
         # Check for potential error flags in the message status
         if message.status in ['failed', 'undelivered']:
             return False, f"Message creation succeeded but delivery failed. Status: {message.status}, Error: {message.error_message}"
-        
+       
         return True, f"WhatsApp message sent with SID {message.sid}, Status: {message.status}"
     except Exception as e:
         return False, f"Twilio Error: {str(e)}"
-
+ 
 def send_message(platform, recipient, message_text):
     if platform.lower() == "whatsapp":
         return send_whatsapp_message(recipient, message_text)
@@ -322,19 +333,19 @@ def send_message(platform, recipient, message_text):
         return True, f"Telegram message simulated to {recipient}: {message_text}"
     else:
         return False, "Unsupported messaging platform."
-
+ 
 # ----- Payment Gateway (Razorpay simulation) -----
 def process_payment(amount, currency, order_id, description):
     # In a real integration, you'd call Razorpay's API here.
     return True, f"Processed payment of {amount} {currency} for order {order_id}. Description: {description}"
-
+ 
 # ----- CALENDAR INTEGRATION -----
 def get_calendar_service():
     """Get authenticated Google Calendar service."""
     creds = None
     token_path = os.environ.get('GOOGLE_TOKEN_PATH', 'token.json')
     credentials_path = os.environ.get('GOOGLE_CREDENTIALS_PATH', 'credentials.json')
-    
+   
     # Check if token already exists
     if os.path.exists(token_path):
         try:
@@ -342,7 +353,7 @@ def get_calendar_service():
         except Exception as e:
             print(f"Error loading credentials: {e}")
             creds = None
-    
+   
     # If there are no valid credentials, let the user log in
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -360,18 +371,18 @@ def get_calendar_service():
             except Exception as e:
                 print(f"Error during OAuth flow: {e}")
                 return False, f"OAuth flow failed: {str(e)}"
-        
+       
         # Save the credentials for the next run
         with open(token_path, 'w') as token:
             token.write(creds.to_json())
-    
+   
     try:
         service = build('calendar', 'v3', credentials=creds )
         return True, service
     except Exception as e:
         print(f"Error building calendar service: {e}")
         return False, f"Failed to build calendar service: {str(e)}"
-    
+   
 def parse_meeting_details(meeting_data):
     """Parse meeting details from calendar request data."""
     title = meeting_data.get('title', 'Untitled Meeting')
@@ -382,7 +393,7 @@ def parse_meeting_details(meeting_data):
     duration_str = meeting_data.get('duration', '1 hour')
     attendees_list = meeting_data.get('attendees', [])
     phone_numbers = meeting_data.get('phone_numbers', [])  # New: Extract phone numbers
-    
+   
     # Parse date and time
     try:
         # Try to parse combined date and time if available
@@ -398,23 +409,23 @@ def parse_meeting_details(meeting_data):
             # If no date/time, use tomorrow at noon
             tomorrow = datetime.date.today() + datetime.timedelta(days=1)
             start_time = datetime.datetime.combine(tomorrow, datetime.time(12, 0))
-        
+       
         # Parse duration
         duration_hours = 1  # Default 1 hour
         if duration_str:
             duration_match = re.search(r'(\d+)\s*(?:hour|hr)', duration_str, re.IGNORECASE)
             if duration_match:
                 duration_hours = int(duration_match.group(1))
-            
+           
             # Check for minutes
             minutes_match = re.search(r'(\d+)\s*(?:minute|min)', duration_str, re.IGNORECASE)
             minutes = 0
             if minutes_match:
                 minutes = int(minutes_match.group(1))
                 duration_hours += minutes / 60
-        
+       
         end_time = start_time + datetime.timedelta(hours=duration_hours)
-        
+       
         return True, {
             'title': title,
             'description': description,
@@ -426,8 +437,8 @@ def parse_meeting_details(meeting_data):
         }
     except Exception as e:
         return False, f"Failed to parse meeting details: {str(e)}"
-
-
+ 
+ 
 def add_calendar_event(meeting_data):
     """Add a calendar event using Google Calendar API."""
     try:
@@ -435,21 +446,21 @@ def add_calendar_event(meeting_data):
         success, service_or_error = get_calendar_service()
         if not success:
             return False, service_or_error  # Return error message or auth info
-        
+       
         # If auth is required, return the auth info
         if isinstance(service_or_error, dict) and service_or_error.get('auth_required'):
             return False, service_or_error
-        
+       
         service = service_or_error  # If successful, service_or_error contains the service
-        
+       
         # Parse meeting details
         success, details = parse_meeting_details(meeting_data)
         if not success:
             return False, details  # Error message
-        
+       
         # Format attendees
         attendees = [{'email': email} for email in details['attendees']] if details['attendees'] else []
-        
+       
         # Create event
         event = {
             'summary': details['title'],
@@ -468,11 +479,11 @@ def add_calendar_event(meeting_data):
                 'useDefault': True
             },
         }
-        
+       
         # Insert the event
         calendar_id = 'primary'  # Use primary calendar
         event = service.events().insert(calendarId=calendar_id, body=event).execute()
-        
+       
         # Create meeting details message
         meeting_details = (
             f"Meeting: {details['title']}\n"
@@ -481,22 +492,22 @@ def add_calendar_event(meeting_data):
             f"Location: {details['location']}\n"
             f"Meeting Link: {event.get('htmlLink', 'No link available')}"
         )
-        
+       
         # Send email to attendees
         if attendees:
             subject = f"Invitation: {details['title']}"
             body = f"You have been invited to a meeting:\n\n{meeting_details}"
-            
+           
             for attendee in attendees:
                 send_email(attendee['email'], subject, body)
-        
+       
         # Send WhatsApp messages to phone numbers
         whatsapp_results = []
         if details.get('phone_numbers'):
             for phone in details['phone_numbers']:
                 # Format the message for WhatsApp
                 whatsapp_message = f"📅 Meeting Invitation 📅\n\n{meeting_details}"
-                
+               
                 # Send WhatsApp message
                 success, message = send_whatsapp_message(phone, whatsapp_message)
                 whatsapp_results.append({
@@ -504,7 +515,7 @@ def add_calendar_event(meeting_data):
                     'success': success,
                     'message': message
                 })
-        
+       
         return True, {
             'message': f"Meeting '{details['title']}' scheduled successfully.",
             'event_id': event.get('id'),
@@ -513,57 +524,58 @@ def add_calendar_event(meeting_data):
         }
     except Exception as e:
         return False, f"Failed to add calendar event: {str(e)}"
+   
 # ----- OAUTH CALLBACK ROUTE -----
 @app.route('/oauth2callback')
 def oauth2callback():
     """Handle the OAuth2 callback from Google."""
     credentials_path = os.environ.get('GOOGLE_CREDENTIALS_PATH', 'credentials.json')
     token_path = os.environ.get('GOOGLE_TOKEN_PATH', 'token.json')
-    
+   
     if not os.path.exists(credentials_path):
         return jsonify({"error": "Missing credentials file"}), 500
-    
+   
     try:
         flow = InstalledAppFlow.from_client_secrets_file(
             credentials_path,
             SCOPES,
             redirect_uri=request.base_url
         )
-        
+       
         # Use the authorization code from the callback
         code = request.args.get('code')
         if not code:
             return jsonify({"error": "No authorization code provided"}), 400
-        
+       
         flow.fetch_token(code=code)
         creds = flow.credentials
-        
+       
         # Save the credentials
         with open(token_path, 'w') as token:
             token.write(creds.to_json())
-        
+       
         return jsonify({"message": "Successfully authenticated with Google Calendar!"}), 200
     except Exception as e:
         return jsonify({"error": f"Authentication failed: {str(e)}"}), 500
-    
+   
 def get_gmail_service():
     """Get authenticated Gmail service using the same credentials as Calendar."""
     token_path = os.environ.get('GOOGLE_TOKEN_PATH', 'token.json')
-    
+   
     # Check if token exists and load credentials directly
     if os.path.exists(token_path):
         try:
             with open(token_path, 'r') as token_file:
                 creds_info = json.loads(token_file.read())
                 creds = Credentials.from_authorized_user_info(creds_info, SCOPES)
-                
+               
                 # Verify credentials are valid
                 if not creds.valid:
                     if creds.expired and creds.refresh_token:
                         creds.refresh(Request())
                     else:
                         return False, "Credentials expired and cannot be refreshed"
-                
+               
                 # Build Gmail service with the credentials
                 gmail_service = build('gmail', 'v1', credentials=creds)
                 return True, gmail_service
@@ -574,7 +586,7 @@ def get_gmail_service():
         credentials_path = os.environ.get('GOOGLE_CREDENTIALS_PATH', 'credentials.json')
         if not os.path.exists(credentials_path):
             return False, "Missing Google credentials file."
-            
+           
         try:
             flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
             auth_url, _ = flow.authorization_url(access_type='offline', include_granted_scopes='true')
@@ -588,26 +600,26 @@ def find_latest_email(sender_email):
         success, service_or_error = get_gmail_service()
         if not success:
             return False, service_or_error
-        
+       
         service = service_or_error
-        
+       
         # Search for emails from the sender
         query = f"from:{sender_email}"
         result = service.users().messages().list(userId='me', q=query, maxResults=1).execute()
         messages = result.get('messages', [])
-        
+       
         if not messages:
             return False, f"No emails found from {sender_email}"
-        
+       
         # Get the most recent email
         msg_id = messages[0]['id']
         message = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
-        
+       
         # Extract subject and body
         headers = message['payload']['headers']
         subject = next((header['value'] for header in headers if header['name'].lower() == 'subject'), 'No Subject')
         thread_id = message['threadId']
-        
+       
         # Extract the body (might be in plain text or HTML)
         body = ""
         if 'parts' in message['payload']:
@@ -617,7 +629,7 @@ def find_latest_email(sender_email):
                     break
         elif 'body' in message['payload'] and 'data' in message['payload']['body']:
             body = base64.urlsafe_b64decode(message['payload']['body']['data']).decode('utf-8')
-        
+       
         return True, {
             'id': msg_id,
             'thread_id': thread_id,
@@ -627,15 +639,15 @@ def find_latest_email(sender_email):
         }
     except Exception as e:
         return False, f"Error finding email: {str(e)}"
-
+ 
 def generate_email_reply(email_content):
     """Generate an appropriate reply using the LLM."""
     groq_api_key = os.getenv("GROQ_API_KEY")
     if not groq_api_key:
         return False, "Missing GROQ_API_KEY environment variable."
-    
+   
     client = Groq(api_key=groq_api_key)
-    
+   
     messages = [
         {
             "role": "system",
@@ -649,11 +661,11 @@ def generate_email_reply(email_content):
             )
         },
         {
-            "role": "user", 
+            "role": "user",
             "content": f"Please draft a reply to the following email:\n\n{email_content}"
         }
     ]
-    
+   
     try:
         response = client.chat.completions.create(
             model="llama3-70b-8192",
@@ -661,12 +673,12 @@ def generate_email_reply(email_content):
             max_tokens=500,
             temperature=0.7
         )
-        
+       
         reply_content = response.choices[0].message.content.strip()
         return True, reply_content
     except Exception as e:
         return False, f"Failed to generate email reply: {str(e)}"
-
+ 
 def send_email_reply(email_data, reply_content):
     """Send a reply to the specified email."""
     try:
@@ -674,19 +686,19 @@ def send_email_reply(email_data, reply_content):
         success, service_or_error = get_gmail_service()
         if not success:
             return False, service_or_error
-        
+       
         service = service_or_error
-        
+       
         # Create the message
         message = MIMEText(reply_content)
         message['To'] = email_data['sender']
         message['Subject'] = f"Re: {email_data['subject']}"
         message['In-Reply-To'] = email_data['id']
         message['References'] = email_data['id']
-        
+       
         # Encode the message
         encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        
+       
         # Create the draft message
         draft = {
             'message': {
@@ -694,10 +706,10 @@ def send_email_reply(email_data, reply_content):
                 'threadId': email_data['thread_id']
             }
         }
-        
+       
         # Send the message
         sent_message = service.users().messages().send(userId='me', body={'raw': encoded_message, 'threadId': email_data['thread_id']}).execute()
-        
+       
         return True, {
             'message_id': sent_message['id'],
             'thread_id': sent_message['threadId'],
@@ -705,7 +717,7 @@ def send_email_reply(email_data, reply_content):
         }
     except Exception as e:
         return False, f"Failed to send email reply: {str(e)}"
-
+ 
 def handle_email_reply(sender_email):
     """Handle the full email reply process."""
     try:
@@ -713,17 +725,17 @@ def handle_email_reply(sender_email):
         success, email_data = find_latest_email(sender_email)
         if not success:
             return False, email_data
-        
+       
         # Generate a reply
         success, reply_content = generate_email_reply(email_data['body'])
         if not success:
             return False, reply_content
-        
+       
         # Send the reply
         success, reply_result = send_email_reply(email_data, reply_content)
         if not success:
             return False, reply_result
-        
+       
         return True, {
             'message': f"Successfully replied to email from {sender_email}",
             'email_subject': email_data['subject'],
@@ -731,63 +743,69 @@ def handle_email_reply(sender_email):
         }
     except Exception as e:
         return False, f"Failed to handle email reply: {str(e)}"
-
+ 
 # ----- GROQ INTEGRATION -----
 def get_action_from_llm(query):
     groq_api_key = os.getenv("GROQ_API_KEY")
     if not groq_api_key:
         return False, "Missing GROQ_API_KEY environment variable."
-        
+       
     client = Groq(api_key=groq_api_key)
-
+ 
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are an exceptionally intelligent, human-like, highly intuitive, and context-aware AI assistant specialized in deeply understanding the intent behind user requests and responding with exceptionally realistic, professional, empathetic, nuanced, and contextually accurate actions. "
-                 "Your responses should be indistinguishable from those crafted by a thoughtful human being, carefully considering subtle emotional nuances and interpersonal relationships. Respond ONLY with a valid JSON object containing thoroughly detailed and context-sensitive action data. Never include any explanations, markdown, or text outside the JSON object.\n\n"
-                "Available actions:\n"
-                "1) email - When the user wants to send an email\n"
-                "2) task - When the user wants to manage tasks (create, read, update, delete)\n"
-                "3) scrape - When the user wants news information\n"
-                "4) message - When the user wants to send messages via WhatsApp or Telegram\n"
-                "5) payment - When the user wants to process a payment\n"
-                "6) chat - For normal conversation\n"
-                "7) summarize - For summarizing a webpage\n"
-                "8) web_search - For performing a web search\n"
-                "9) calendar - When the user wants to schedule a meeting or event\n"
-                "10) email_reply - When the user wants to reply to an email from a specific sender\n\n"
-                "Intelligent Guidelines:\n"
-        "- Email: Automatically craft realistic, highly personalized, and nuanced emails based on inferred interpersonal context, adjusting tone, language, and level of formality according to the recipient's relationship with the sender. Precisely infer appropriate salutations, subjects, and closing remarks.\n"
-        "- Task: Precisely manage task actions (create, update, read, delete), intuitively understanding user intent, urgency, and priority, and include actionable, clear descriptions.\n"
-        "- Scrape: Intelligently determine exactly what information the user needs and provide detailed extraction.\n"
-        "- Message: Compose exceptionally realistic and emotionally nuanced WhatsApp or Telegram messages, reflecting genuine human warmth, empathy, casualness, humor, or professionalism based on context.\n"
-        "- Payment: Clearly and accurately interpret transaction intent, providing explicit recipient details, amounts, currencies, and contextually appropriate descriptions.\n"
-        "- Chat: Engage in authentic, human-like conversations, showcasing deep emotional intelligence, genuine empathy, sensitivity, warmth, humor, or seriousness, depending entirely on context.\n"
-        "- Summarize: Provide succinct and intelligent summaries, skillfully capturing underlying nuances and the essence of provided content.\n"
-        "- Web Search: Conduct highly precise, nuanced web searches accurately tailored to the exact intent and underlying context of the user's request.\n"
-        "- Calendar: Accurately parse and intelligently convert natural language dates and times, proactively detailing comprehensive event information including nuanced contextual data such as location, attendees, duration, and descriptions (if not given create by your own intelligence), implicitly or explicitly stated.\n"
-        "- Email Reply: Intelligently identify when a user wants to reply to an email from a specific sender, extracting the sender's email address from the query. Be able to understand requests like 'reply to the email from john@example.com' or 'respond to the message I got from Sarah (sarah@company.com).'\n\n"
-                "Example formats:\n"
-                "For email: {\"action\": \"email\", \"recipient\": \"email@example.com\", \"subject\": \"Meeting\", \"body\": \"Let's meet tomorrow\"}\n"
-                "For web search: {\"action\": \"web_search\", \"query\": \"latest news\"}\n"
-                "For chat: {\"action\": \"chat\", \"body\": \"I'm here to help!\"}\n"
-                "For task: {\"action\": \"task\", \"task_action\": \"create\", \"task_data\": {\"title\": \"Meeting\", \"description\": \"Team meeting\"}}\n"
-                "For summarize: {\"action\": \"summarize\", \"url\": \"https://example.com\"}\n"
-                "For calendar: {\"action\": \"calendar\", \"meeting_data\": {\"title\": \"Team Meeting\", \"date\": \"2025-03-28\", \"time\": \"10:00\", \"duration\": \"1 hour\", \"attendees\": [\"colleague@example.com\"], \"phone_numbers\": [\"+1234567890\"]}}\n"
-                "For message: {\"action\": \"message\", \"platform\": \"whatsapp\", \"recipient\": \"+1234567890\", \"message\": \"Hello there\"}\n"
-                "For email_reply: {\"action\": \"email_reply\", \"sender_email\": \"john@example.com\"}\n"
-                "For calendar actions, extract as much information as possible including title, date, time, duration, location, description, attendees, and phone numbers if available. Phone numbers should be separate from attendees and will be used to send WhatsApp notifications. If date or time is specified in a natural way like 'tomorrow at 2pm' or '28th March', parse and convert it to proper date format. IF DESCRIPTION IS NOT DEFINED CREATE ONE FROM THE TITLE ITSELF USING YOUR OWN INTELLIGENCE DON'T JUST COPY THE AND LOCATION WILL BE REMOTE IF NOT MENTIONED BY THE USER.\n\n"
-                
-                "IMPORTANT: For calendar actions, look for phone numbers in the query and extract them into the phone_numbers array. Common formats include '+1234567890', '123-456-7890', or even mentions like 'send WhatsApp to 1234567890'.\n\n"
-                "IMPORTANT: For email_reply actions, extract the sender's email address from the query. Look for phrases like 'reply to email from [email]', 'respond to [email]', etc.\n\n"
-                "IMPORTANT: If someone asks for your name like Hey what's your name, what should i call you, then remeber that your name is Teliolabs POC Testing LAM '.\n\n"
-                "ALWAYS return ONLY deeply intuitive, context-aware, realistic, emotionally intelligent, and comprehensive JSON responses without additional explanations, markdown, or formatting"
-            )
-        },
-        {"role": "user", "content": f'Query: "{query}"'}
+    {
+        "role": "system",
+        "content": (
+            "You are an exceptionally intelligent, human-like, highly intuitive, and context-aware AI assistant specialized in deeply understanding the intent behind user requests and responding with exceptionally realistic, professional, empathetic, nuanced, and contextually accurate actions. "
+            "Your responses should be indistinguishable from those crafted by a thoughtful human being, carefully considering subtle emotional nuances and interpersonal relationships. Respond ONLY with a valid JSON object containing thoroughly detailed and context-sensitive action data. Never include any explanations, markdown, or text outside the JSON object.\n\n"
+            "You are an exceptionally intelligent, human-like AI assistant. "
+            "For casual conversation like greetings or small talk, respond with ONLY a JSON object like: "
+            "{\"action\": \"chat\", \"body\": \"your response here\"}\n"
+            "For all other requests that require specific actions, respond with the appropriate action JSON. "
+            "Never include any explanations, markdown, or text outside the JSON object."
+            "IMPORTANT- IF SOMEONNE ASKS YOU YOUR NAME LIKE Hey, what's your name or in any way they asks your name remember that your name is TELIOLABS DEMO LAM OR If someone is interested in casual conversation then talk to them in a natural way"
+            "Also based on user language like hindi, english, hinglish, germany or any give answer in that language only"
+            "Available actions:\n"
+            "1) email - When the user wants to send an email\n"
+            "2) task - When the user wants to manage tasks (create, read, update, delete)\n"
+            "3) scrape - When the user wants news information\n"
+            "4) message - When the user wants to send messages via WhatsApp or Telegram\n"
+            "5) payment - When the user wants to process a payment\n"
+            "6) chat - For normal conversation\n"
+            "7) summarize - For summarizing a webpage\n"
+            "8) web_search - For performing a web search\n"
+            "9) calendar - When the user wants to schedule a meeting or event\n"
+            "10) email_reply - When the user wants to reply to an email from a specific sender\n"
+            "11) chat_history - When the user wants to retrieve their past conversation history\n\n"
+            "12) workflow - When the user wants to make changes in any existing camunda workflows\n\n"
+            "Intelligent Guidelines:\n"
+            "- Email: Automatically craft realistic, highly personalized, and nuanced emails based on inferred interpersonal context, adjusting tone, language, and level of formality according to the recipient's relationship with the sender. Precisely infer appropriate salutations, subjects, and closing remarks.\n"
+            "- Task: Precisely manage task actions (create, update, read, delete), intuitively understanding user intent, urgency, and priority, and include actionable, clear descriptions.\n"
+            "- Scrape: Intelligently determine exactly what information the user needs and provide detailed extraction.\n"
+            "- Message: Compose exceptionally realistic and emotionally nuanced WhatsApp or Telegram messages, reflecting genuine human warmth, empathy, casualness, humor, or professionalism based on context.\n"
+            "- Payment: Clearly and accurately interpret transaction intent, providing explicit recipient details, amounts, currencies, and contextually appropriate descriptions.\n"
+            "- Chat: Engage in authentic, human-like conversations, showcasing deep emotional intelligence, genuine empathy, sensitivity, warmth, humor, or seriousness, depending entirely on context.\n"
+            "- Summarize: Provide succinct and intelligent summaries, skillfully capturing underlying nuances and the essence of provided content.\n"
+            "- Web Search: Conduct highly precise, nuanced web searches accurately tailored to the exact intent and underlying context of the user's request.\n"
+            "- Calendar: Accurately parse and intelligently convert natural language dates and times, proactively detailing comprehensive event information including nuanced contextual data such as location, attendees, duration, and descriptions (if not given, create one from the title using your own intelligence), with location set to remote if not mentioned.\n"
+            "- Email Reply: Intelligently identify when a user wants to reply to an email from a specific sender, extracting the sender's email address from the query. Understand requests like 'reply to the email from john@example.com' or 'respond to the message I got from Sarah (sarah@company.com)'.\n"
+            "- Chat History: Retrieve and summarize the user's past conversation history stored in the system if requested.\n\n"
+            "Example formats:\n"
+            "For email: {\"action\": \"email\", \"recipient\": \"email@example.com\", \"subject\": \"Meeting\", \"body\": \"Let's meet tomorrow\"}\n"
+            "For web search: {\"action\": \"web_search\", \"query\": \"latest news\"}\n"
+            "For chat: {\"action\": \"chat\", \"body\": \"I'm here to help!\"}\n"
+            "For task: {\"action\": \"task\", \"task_action\": \"create\", \"task_data\": {\"title\": \"Meeting\", \"description\": \"Team meeting\"}}\n"
+            "For summarize: {\"action\": \"summarize\", \"url\": \"https://example.com\"}\n"
+            "For calendar: {\"action\": \"calendar\", \"meeting_data\": {\"title\": \"Team Meeting\", \"date\": \"2025-03-28\", \"time\": \"10:00\", \"duration\": \"1 hour\", \"attendees\": [\"colleague@example.com\"], \"phone_numbers\": [\"+1234567890\"]}}\n"
+            "For message: {\"action\": \"message\", \"platform\": \"whatsapp\", \"recipient\": \"+1234567890\", \"message\": \"Hello there\"}\n"
+            "For email_reply: {\"action\": \"email_reply\", \"sender_email\": \"john@example.com\"}\n"
+            "For chat_history: {\"action\": \"chat_history\", \"user_id\": \"user123\"}\n"
+            "ALWAYS return ONLY deeply intuitive, context-aware, realistic, emotionally intelligent, and comprehensive JSON responses without additional explanations, markdown, or formatting"
+        )
+    },
+    {"role": "user", "content": f'Query: "{query}"'}
     ]
-
+ 
     try:
         response = client.chat.completions.create(
             model="llama3-70b-8192",
@@ -797,9 +815,9 @@ def get_action_from_llm(query):
             top_p=1,
             response_format={"type": "json_object"}  
         )
-
+ 
         text = response.choices[0].message.content.strip()
-        
+       
         # Handle any potential non-JSON content by extracting just the JSON part
         try:
             # Try to parse as is first
@@ -819,59 +837,120 @@ def get_action_from_llm(query):
             else:
                 # Fallback if no JSON-like structure found
                 action_data = {"action": "chat", "body": "I couldn't understand that request. Could you rephrase it?"}
-        
+       
         return True, action_data
-
+ 
     except Exception as e:
         # Log the error for debugging
         print(f"Error in get_action_from_llm: {str(e)}")
         print(f"Raw response (if available): {getattr(response, 'choices', [])}")
-        
+       
         # Provide a fallback response rather than returning an error
         fallback_response = {"action": "chat", "body": "I encountered an issue processing your request. Could you try again?"}
         return True, fallback_response
-
-# ----- MAIN ENDPOINT -----
+ 
 @app.route('/action', methods=['POST'])
 def handle_action():
     data = request.get_json()
     if not data or 'query' not in data:
         return jsonify({"error": "No query provided."}), 400
-
+ 
     query = data['query']
-    success, result = get_action_from_llm(query)
+    user_id = data.get('user_id', 'anonymous')
+   
+    # Fetch the last 10 conversation messages for the user (ordered by timestamp ascending)
+    history_records = ChatHistory.query.filter_by(user_id=user_id) \
+                           .order_by(ChatHistory.timestamp.asc()).limit(10).all()
+   
+    # Build conversation context for the LLM prompt
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an exceptionally intelligent, human-like, highly intuitive, and context-aware AI assistant specialized in deeply understanding the intent behind user requests and responding with exceptionally realistic, professional, empathetic, nuanced, and contextually accurate actions. "
+                "Your responses should be indistinguishable from those crafted by a thoughtful human being. Respond ONLY with a valid JSON object containing action data as instructed. Do not include any extra explanations or markdown."
+                "\n\nAvailable actions: email, task, scrape, message, payment, chat, summarize, web_search, calendar, email_reply, chat_history."
+            )
+        }
+    ]
+   
+    # Append past conversation context from chat history
+    for record in history_records:
+        messages.append({"role": record.role, "content": record.message})
+   
+    # Append current query as the latest user message
+    messages.append({"role": "user", "content": query})
+   
+    # Call your LLM function with the full conversation context
+    success, result = get_action_from_llm(messages)
     if not success:
         return jsonify({"error": "Failed to process query", "details": result}), 500
-
+   
+    # Save the current user query in chat history
+    try:
+        new_user_msg = ChatHistory(user_id=user_id, role="user", message=query)
+        db.session.add(new_user_msg)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error saving user message: {e}")
+   
+    # Process the action returned by the LLM
     action = result.get('action')
-    known_actions = ['email', 'task', 'scrape', 'message', 'payment', 'chat', 'summarize', 'web_search', 'calendar', 'email_reply']
-
+    known_actions = ['email', 'task', 'scrape', 'message', 'payment', 'chat', 'summarize', 'web_search', 'calendar', 'email_reply', 'chat_history']
     if not action or action not in known_actions:
         fallback_response = result.get('body', "I'm sorry, I didn't understand that. Can you please rephrase?")
+        # Save assistant's fallback response in history
+        try:
+            new_assistant_msg = ChatHistory(user_id=user_id, role="assistant", message=f"Fallback: {fallback_response}")
+            db.session.add(new_assistant_msg)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error saving assistant message: {e}")
         return jsonify({"message": fallback_response}), 200
-    
-    if action == 'email_reply':
+ 
+    # Handle chat_history action: simply return the stored conversation
+    if action == 'chat_history':
+        try:
+            history = ChatHistory.query.filter_by(user_id=user_id).order_by(ChatHistory.timestamp.desc()).all()
+            history_list = [{"role": h.role, "message": h.message, "timestamp": h.timestamp.isoformat()} for h in history]
+            return jsonify({"message": f"Chat history for you is in the Inspect, please check", "history": history_list}), 200
+        except Exception as e:
+            return jsonify({"error": "Failed to retrieve chat history.", "details": str(e)}), 500
+ 
+    # Handle email_reply action branch
+    elif action == 'email_reply':
         sender_email = result.get('sender_email')
         if not sender_email:
             return jsonify({"error": "No sender email provided."}), 400
-        
+ 
         success, reply_result = handle_email_reply(sender_email)
         if success:
-            return jsonify({
+            assistant_response = {
                 "message": reply_result['message'],
                 "details": {
                     "subject": reply_result['email_subject'],
                     "reply": reply_result['reply_content']
                 }
-            }), 200
+            }
+            try:
+                new_assistant_msg = ChatHistory(user_id=user_id, role="assistant", message=json.dumps(assistant_response))
+                db.session.add(new_assistant_msg)
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"Error saving assistant message: {e}")
+            return jsonify(assistant_response), 200
         else:
             return jsonify({"error": "Failed to reply to email.", "details": reply_result}), 500
-    # Handle calendar action
+ 
+    # Handle calendar action branch
     elif action == 'calendar':
         meeting_data = result.get('meeting_data', {})
         if not meeting_data:
             return jsonify({"error": "No meeting details provided."}), 400
-        
+       
         success, response = add_calendar_event(meeting_data)
         if success:
             return jsonify({
@@ -879,73 +958,103 @@ def handle_action():
                 "event_details": response
             }), 200
         else:
-            # Check if authentication is required
             if isinstance(response, dict) and response.get('auth_required'):
                 return jsonify({
                     "status": "auth_required",
                     "auth_url": response.get('auth_url'),
                     "message": "Google Calendar authentication required. Please visit the authentication URL."
-                }), 202  # 202 Accepted indicates the request was valid but needs further action
+                }), 202
             return jsonify({"error": "Failed to schedule meeting.", "details": response}), 500
-
+ 
+    # Handle chat (normal conversation) branch
     elif action == 'chat':
         chat_reply = result.get('body', "Hello! How can I help you?")
+        try:
+            new_assistant_msg = ChatHistory(user_id=user_id, role="assistant", message=chat_reply)
+            db.session.add(new_assistant_msg)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error saving assistant message: {e}")
         return jsonify({"message": chat_reply}), 200
-
+ 
+    # Handle summarize action branch
     elif action == 'summarize':
         url = result.get('url')
         if not url:
             return jsonify({"error": "No URL provided for summarization."}), 400
-
+ 
         success, summary = scrape_and_summarize(url)
         if success:
+            try:
+                new_assistant_msg = ChatHistory(user_id=user_id, role="assistant", message=summary)
+                db.session.add(new_assistant_msg)
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"Error saving assistant message: {e}")
             return jsonify({"message": summary, "summary": summary}), 200
         else:
             return jsonify({"error": "Failed to generate summary.", "details": summary}), 500
-
+ 
+    # Handle web_search action branch
     elif action == 'web_search':
         search_query = result.get('query')
         if not search_query:
             return jsonify({"error": "No search query provided."}), 400
-
+ 
         api_key = os.environ.get("SERPAPI_API_KEY")
         if not api_key:
             return jsonify({"error": "Missing SERPAPI_API_KEY environment variable."}), 500
-
+ 
         success, search_results = perform_web_search(search_query, api_key)
         if success:
-            # Format the search results as a readable message
             results_message = f"Search results for '{search_query}':\n\n"
             for idx, result_item in enumerate(search_results, 1):
                 results_message += f"{idx}. {result_item['title']}\n"
                 results_message += f"   {result_item['link']}\n"
                 results_message += f"   {result_item['snippet']}\n\n"
-            
+            try:
+                new_assistant_msg = ChatHistory(user_id=user_id, role="assistant", message=results_message)
+                db.session.add(new_assistant_msg)
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"Error saving assistant message: {e}")
             return jsonify({
-                "message": results_message,  # Include formatted results in the message
-                "results": search_results     # Keep the raw results for UI processing
+                "message": results_message,
+                "results": search_results
             }), 200
         else:
             return jsonify({"error": "Failed to perform web search.", "details": search_results}), 500
-    
+ 
+    # Handle email sending action branch
     elif action == 'email':
         recipient = result.get('recipient')
         subject = result.get('subject', 'No Subject')
         body = result.get('body', '')
-        
+       
         if not recipient:
             return jsonify({"error": "No recipient provided for email."}), 400
-        
+       
         success, message = send_email(recipient, subject, body)
         if success:
+            try:
+                new_assistant_msg = ChatHistory(user_id=user_id, role="assistant", message="Email sent successfully.")
+                db.session.add(new_assistant_msg)
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"Error saving assistant message: {e}")
             return jsonify({"message": "Email sent successfully."}), 200
         else:
             return jsonify({"error": "Failed to send email.", "details": message}), 500
-    
+ 
+    # Handle task operations action branch
     elif action == 'task':
         task_action = result.get('task_action', 'create')
         task_data = result.get('task_data', {})
-        
+       
         if task_action == 'create':
             success, message = create_task(task_data)
         elif task_action == 'read':
@@ -956,59 +1065,91 @@ def handle_action():
             success, message = delete_task(task_data)
         else:
             return jsonify({"error": f"Unknown task action: {task_action}"}), 400
-        
+       
         if success:
+            try:
+                new_assistant_msg = ChatHistory(user_id=user_id, role="assistant", message="Task operation successful.")
+                db.session.add(new_assistant_msg)
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"Error saving assistant message: {e}")
             return jsonify({"message": "Task operation successful.", "result": message}), 200
         else:
             return jsonify({"error": "Task operation failed.", "details": message}), 500
-    
+ 
+    # Handle news scraping action branch
     elif action == 'scrape':
         query = result.get('query')
         if not query:
             return jsonify({"error": "No query provided for scraping."}), 400
-        
+       
         success, headlines = perform_scraping_news(query)
         if success:
+            try:
+                new_assistant_msg = ChatHistory(user_id=user_id, role="assistant", message=f"News: {headlines}")
+                db.session.add(new_assistant_msg)
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"Error saving assistant message: {e}")
             return jsonify({"message": "News scraped successfully.", "headlines": headlines}), 200
         else:
             return jsonify({"error": "Failed to scrape news.", "details": headlines}), 500
-    
+ 
+    # Handle messaging action branch
     elif action == 'message':
         platform = result.get('platform')
         recipient = result.get('recipient')
         message_text = result.get('message', '')
-        
+       
         if not platform:
             return jsonify({"error": "No messaging platform specified."}), 400
         if not recipient:
             return jsonify({"error": "No recipient provided for message."}), 400
-        
+       
         success, message = send_message(platform, recipient, message_text)
         if success:
+            try:
+                new_assistant_msg = ChatHistory(user_id=user_id, role="assistant", message=message)
+                db.session.add(new_assistant_msg)
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"Error saving assistant message: {e}")
             return jsonify({"message": "Message sent successfully.", "details": message}), 200
         else:
             return jsonify({"error": "Failed to send message.", "details": message}), 500
-    
+ 
+    # Handle payment processing action branch
     elif action == 'payment':
         amount = result.get('amount')
         currency = result.get('currency', 'USD')
         order_id = result.get('order_id', 'order_' + str(hash(str(amount) + currency))[1:8])
         description = result.get('description', 'Payment processed')
-        
+       
         if not amount:
             return jsonify({"error": "No amount provided for payment."}), 400
-        
+       
         success, message = process_payment(amount, currency, order_id, description)
         if success:
+            try:
+                new_assistant_msg = ChatHistory(user_id=user_id, role="assistant", message="Payment processed successfully.")
+                db.session.add(new_assistant_msg)
+                db.session.commit()
+            except Exception as e:
+                db.session.rollback()
+                print(f"Error saving assistant message: {e}")
             return jsonify({"message": "Payment processed successfully.", "details": message}), 200
         else:
             return jsonify({"error": "Failed to process payment.", "details": message}), 500
-    
+ 
     # Fallback for unknown actions
     return jsonify({"error": f"Action '{action}' is recognized but not implemented."}), 501
-
+ 
 # ----- RUN APPLICATION -----
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
     app.run(debug=True)
+ 

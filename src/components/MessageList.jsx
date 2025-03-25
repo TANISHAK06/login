@@ -142,23 +142,6 @@ const MessageList = ({
                     >
                       {formatTime(message.timestamp)}
                     </span>
-
-                    {/* Add play button for system messages */}
-                    {/*message.sender === "system" && !message.error && (
-                      <motion.button
-                        onClick={() => speakMessage(message.text)}
-                        whileHover={{ scale: 1.1 }}
-                        whileTap={{ scale: 0.9 }}
-                        className={`ml-auto text-sm p-1 rounded-full ${
-                          theme === "dark"
-                            ? "bg-gray-700 text-gray-300 hover:bg-gray-600"
-                            : "bg-gray-200 text-gray-600 hover:bg-gray-300"
-                        }`}
-                        title="Play message"
-                      >
-                        🔊
-                      </motion.button>
-                    )*/}
                   </div>
                   <div
                     className={`text-sm md:text-base ${
