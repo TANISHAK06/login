@@ -15,9 +15,9 @@ const ChatInterface = ({ userData }) => {
   ]);
   const [inputMessage, setInputMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isProcessingDocument, setIsProcessingDocument] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(true);
   const [theme, setTheme] = useState("blue");
-  // Add new state for voice output
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -27,6 +27,7 @@ const ChatInterface = ({ userData }) => {
     "Tell me about Financial updates?",
     "Send the email to anyone",
     "Search for machine learning basics",
+    "Process this document for me",
   ];
 
   const themeClasses = {
@@ -76,35 +77,20 @@ const ChatInterface = ({ userData }) => {
     },
   };
 
-  // Scroll to bottom whenever messages change
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
-  // Check for authentication
   useEffect(() => {
     if (!localStorage.getItem("token")) {
       navigate("/login");
     }
-
-    // Focus input field
     inputRef.current?.focus();
-
-    // Add welcome animation
     const timer = setTimeout(() => {
       setShowSuggestions(true);
     }, 1000);
-
-    // Initialize speech synthesis voices if browser supports it
-    if (window.speechSynthesis) {
-      window.speechSynthesis.onvoiceschanged = () => {
-        // Voices loaded (needed for some browsers)
-      };
-    }
-
     return () => {
       clearTimeout(timer);
-      // Cancel any ongoing speech when component unmounts
       if (window.speechSynthesis) {
         window.speechSynthesis.cancel();
       }
@@ -118,13 +104,9 @@ const ChatInterface = ({ userData }) => {
   const handleSendMessage = async (e, suggestedText = null) => {
     e && e.preventDefault();
     const messageText = suggestedText || inputMessage;
-
     if (!messageText.trim()) return;
 
-    // Hide suggestions after user sends a message
     setShowSuggestions(false);
-
-    // Add user message
     const userMessage = {
       id: messages.length + 1,
       text: messageText,
@@ -136,46 +118,27 @@ const ChatInterface = ({ userData }) => {
     setIsLoading(true);
 
     try {
-      // Send request to AI endpoint
       const response = await fetch("http://127.0.0.1:5000/action", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          //"x-auth-token": localStorage.getItem("token"),
         },
         body: JSON.stringify({ query: messageText }),
       });
 
-      if (!response.ok) {
-        throw new Error(`Error: ${response.status}`);
-      }
-
+      if (!response.ok) throw new Error(`Error: ${response.status}`);
       const data = await response.json();
 
-      // Check if this is a web search result
-      if (data.results && Array.isArray(data.results)) {
-        // This is a web search response
-        const systemMessage = {
-          id: messages.length + 2,
-          text: "Here are the search results I found:",
-          sender: "system",
-          timestamp: new Date(),
-          searchResults: data.results, // Pass search results to the message
-        };
-        setMessages((prev) => [...prev, systemMessage]);
-      } else {
-        // This is a regular text response
-        const systemMessage = {
-          id: messages.length + 2,
-          text: data.message || "I'm processing your request...",
-          sender: "system",
-          timestamp: new Date(),
-        };
-        setMessages((prev) => [...prev, systemMessage]);
-      }
+      const systemMessage = {
+        id: messages.length + 2,
+        text: data.message || "I'm processing your request...",
+        sender: "system",
+        timestamp: new Date(),
+        ...(data.results && { searchResults: data.results }),
+      };
+      setMessages((prev) => [...prev, systemMessage]);
     } catch (error) {
       console.error("Error sending message:", error);
-      // Add error message
       const errorMessage = {
         id: messages.length + 2,
         text: "Sorry, there was an error processing your request. Please try again.",
@@ -186,9 +149,13 @@ const ChatInterface = ({ userData }) => {
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
-      // Focus input after sending
       inputRef.current?.focus();
     }
+  };
+
+  const handleDocumentProcessed = (message) => {
+    setMessages((prev) => [...prev, message]);
+    setIsProcessingDocument(false);
   };
 
   const handleLogout = () => {
@@ -215,14 +182,14 @@ const ChatInterface = ({ userData }) => {
 
       <MessageList
         messages={messages}
-        isLoading={isLoading}
+        isLoading={isLoading || isProcessingDocument}
         theme={theme}
         themeClasses={themeClasses}
         messagesEndRef={messagesEndRef}
         showSuggestions={showSuggestions}
         suggestions={suggestions}
         handleSendMessage={handleSendMessage}
-        voiceEnabled={voiceEnabled} // Add voice enabled prop
+        voiceEnabled={voiceEnabled}
       />
 
       <MessageInput
@@ -233,8 +200,10 @@ const ChatInterface = ({ userData }) => {
         theme={theme}
         themeClasses={themeClasses}
         inputRef={inputRef}
-        voiceEnabled={voiceEnabled} // Add voice enabled prop
-        setVoiceEnabled={setVoiceEnabled} // Add voice toggle function
+        voiceEnabled={voiceEnabled}
+        setVoiceEnabled={setVoiceEnabled}
+        onDocumentProcessed={handleDocumentProcessed}
+        setIsProcessingDocument={setIsProcessingDocument}
       />
     </div>
   );

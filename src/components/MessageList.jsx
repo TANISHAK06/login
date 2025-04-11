@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import WebSearchResults from "./WebSearchResults"; // Import the WebSearchResults component
+import WebSearchResults from "./WebSearchResults";
 
 const MessageList = ({
   messages,
@@ -17,23 +17,13 @@ const MessageList = ({
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   };
 
-  // Create a ref for the currently speaking message
   const speakingRef = useRef(null);
 
-  // Function to speak the message text
   const speakMessage = (messageText) => {
     if (!voiceEnabled || !window.speechSynthesis) return;
-
-    // Cancel any ongoing speech
     window.speechSynthesis.cancel();
-
-    // Create a new speech instance
     const speech = new SpeechSynthesisUtterance(messageText);
-
-    // Get available voices
     const voices = window.speechSynthesis.getVoices();
-
-    // Try to find a good voice - preferably a female voice
     const preferredVoice =
       voices.find(
         (voice) =>
@@ -49,15 +39,10 @@ const MessageList = ({
 
     speech.rate = 1.0;
     speech.pitch = 1.0;
-
-    // Store the speech instance in ref
     speakingRef.current = speech;
-
-    // Speak the text
     window.speechSynthesis.speak(speech);
   };
 
-  // Effect to handle speaking the latest system message
   useEffect(() => {
     if (messages.length > 0 && voiceEnabled) {
       const latestMessage = messages[messages.length - 1];
@@ -67,14 +52,12 @@ const MessageList = ({
     }
   }, [messages, voiceEnabled]);
 
-  // Effect to cancel speech when voice is disabled
   useEffect(() => {
     if (!voiceEnabled && window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
   }, [voiceEnabled]);
 
-  // Effect to clean up speech on component unmount
   useEffect(() => {
     return () => {
       if (window.speechSynthesis) {
@@ -152,19 +135,53 @@ const MessageList = ({
                         : ""
                     } leading-relaxed`}
                   >
-                    {message.text.split("\n").map((paragraph, idx) => (
-                      <p key={idx} className={idx > 0 ? "mt-3" : ""}>
-                        {paragraph}
-                      </p>
-                    ))}
+                    {message.isDocument ? (
+                      <div className="mt-2">
+                        <div className="font-semibold">
+                          Document: {message.documentData.filename}
+                        </div>
+                        <div className="text-xs mb-2">
+                          Type: {message.documentData.file_type}
+                        </div>
+                        <div
+                          className={`p-3 rounded-lg max-h-60 overflow-y-auto ${
+                            theme === "dark" ? "bg-gray-700" : "bg-gray-100"
+                          }`}
+                        >
+                          <pre className="whitespace-pre-wrap text-sm">
+                            {message.text}
+                          </pre>
+                          {/* <button
+                            onClick={() =>
+                              handleSendMessage(
+                                null,
+                                `Please summarize this document: ${message.documentData.extracted_text}`
+                              )
+                            }
+                            className={`mt-2 px-3 py-1 text-xs rounded ${
+                              theme === "dark"
+                                ? "bg-gray-600 hover:bg-gray-500"
+                                : "bg-blue-100 hover:bg-blue-200"
+                            } transition-colors`}
+                          >
+                            Summarize Document
+                          </button>*/}
+                        </div>
+                      </div>
+                    ) : message.searchResults ? (
+                      // Only render WebSearchResults if searchResults exist
+                      <div className="mt-4">
+                        <WebSearchResults results={message.searchResults} />
+                      </div>
+                    ) : (
+                      // Regular message rendering
+                      message.text.split("\n").map((paragraph, idx) => (
+                        <p key={idx} className={idx > 0 ? "mt-3" : ""}>
+                          {paragraph}
+                        </p>
+                      ))
+                    )}
                   </div>
-
-                  {/* Render WebSearchResults if search results are present */}
-                  {message.searchResults && (
-                    <div className="mt-4">
-                      <WebSearchResults results={message.searchResults} />
-                    </div>
-                  )}
                 </div>
               </motion.div>
             ))}
@@ -213,7 +230,6 @@ const MessageList = ({
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Quick suggestions */}
         <AnimatePresence>
           {showSuggestions && messages.length < 3 && (
             <motion.div

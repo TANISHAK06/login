@@ -12,6 +12,8 @@ const MessageInput = ({
   inputRef,
   voiceEnabled,
   setVoiceEnabled,
+  onDocumentProcessed,
+  setIsProcessingDocument,
 }) => {
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState(null);
@@ -82,6 +84,43 @@ const MessageInput = ({
     }
   };
 
+  const handleFileUpload = async (file) => {
+    if (!file) return;
+
+    setIsProcessingDocument(true);
+    setError(null);
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const response = await fetch("http://127.0.0.1:5000/process_document", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) throw new Error("Failed to process document");
+
+      const data = await response.json();
+
+      const message = {
+        id: Date.now(),
+        text: `Document processed (${data.file_type}):\n${data.extracted_text}`,
+        sender: "system",
+        timestamp: new Date(),
+        isDocument: true,
+        documentData: data,
+      };
+
+      onDocumentProcessed(message);
+    } catch (error) {
+      console.error("Error uploading file:", error);
+      setError("Failed to process document");
+    } finally {
+      setIsProcessingDocument(false);
+    }
+  };
+
   const isDarkTheme = theme === "dark";
 
   return (
@@ -125,6 +164,51 @@ const MessageInput = ({
           />
 
           <div className="flex items-center space-x-1 px-1">
+            {/* File Upload Button */}
+            <motion.button
+              type="button"
+              onClick={() => document.getElementById("file-upload").click()}
+              disabled={isLoading || isListening}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              className={`p-2 rounded-md ${
+                isLoading || isListening
+                  ? (isDarkTheme ? "bg-gray-700" : "bg-gray-200") +
+                    " text-gray-500"
+                  : isDarkTheme
+                  ? "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                  : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+              } transition-all duration-300`}
+              title="Upload document"
+            >
+              <span className="flex items-center justify-center h-5 w-5">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+              </span>
+            </motion.button>
+
+            <input
+              id="file-upload"
+              type="file"
+              accept=".pdf,.docx,.csv,.png,.jpg,.jpeg"
+              className="hidden"
+              onChange={(e) => handleFileUpload(e.target.files[0])}
+            />
+
+            {/* Voice Input Button */}
             <motion.button
               type="button"
               onClick={handleVoiceSearch}
@@ -133,16 +217,13 @@ const MessageInput = ({
               whileTap={{ scale: 0.95 }}
               className={`p-2 rounded-md ${
                 isListening
-                  ? `${isDarkTheme ? "bg-red-600" : "bg-red-500"} text-white`
+                  ? (isDarkTheme ? "bg-red-600" : "bg-red-500") + " text-white"
                   : isLoading
-                  ? `${
-                      isDarkTheme ? "bg-gray-700" : "bg-gray-200"
-                    } text-gray-500`
-                  : `${
-                      isDarkTheme
-                        ? "bg-gray-700 text-gray-300 hover:bg-gray-600"
-                        : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                    }`
+                  ? (isDarkTheme ? "bg-gray-700" : "bg-gray-200") +
+                    " text-gray-500"
+                  : isDarkTheme
+                  ? "bg-gray-700 text-gray-300 hover:bg-gray-600"
+                  : "bg-gray-200 text-gray-700 hover:bg-gray-300"
               } transition-all duration-300`}
               title={isListening ? "Listening..." : "Voice input"}
             >
@@ -187,6 +268,7 @@ const MessageInput = ({
               </span>
             </motion.button>
 
+            {/* Voice Output Toggle */}
             <motion.button
               type="button"
               onClick={() => setVoiceEnabled(!voiceEnabled)}
@@ -194,16 +276,12 @@ const MessageInput = ({
               whileTap={{ scale: 0.95 }}
               className={`p-2 rounded-md transition-all duration-300 ${
                 voiceEnabled
-                  ? `${
-                      isDarkTheme
-                        ? `bg-gradient-to-r ${themeClasses[theme].accent} text-white`
-                        : `bg-gradient-to-r ${themeClasses[theme].accent} text-white`
-                    }`
-                  : `${
-                      isDarkTheme
-                        ? "bg-gray-700 text-gray-400"
-                        : "bg-gray-200 text-gray-600"
-                    }`
+                  ? isDarkTheme
+                    ? `bg-gradient-to-r ${themeClasses[theme].accent} text-white`
+                    : `bg-gradient-to-r ${themeClasses[theme].accent} text-white`
+                  : isDarkTheme
+                  ? "bg-gray-700 text-gray-400"
+                  : "bg-gray-200 text-gray-600"
               }`}
               title={
                 voiceEnabled ? "Voice output enabled" : "Voice output disabled"
@@ -245,6 +323,7 @@ const MessageInput = ({
               </span>
             </motion.button>
 
+            {/* Send Button */}
             <motion.button
               type="submit"
               disabled={isLoading || !inputMessage.trim()}
@@ -252,16 +331,12 @@ const MessageInput = ({
               whileTap={{ scale: 0.95 }}
               className={`p-2 rounded-md ${
                 isLoading || !inputMessage.trim()
-                  ? `${
-                      isDarkTheme
-                        ? "bg-gray-700 text-gray-500"
-                        : "bg-gray-200 text-gray-400"
-                    } cursor-not-allowed`
-                  : `${
-                      isDarkTheme
-                        ? `bg-gradient-to-r ${themeClasses[theme].primary} text-white`
-                        : `bg-gradient-to-r ${themeClasses[theme].primary} text-white`
-                    }`
+                  ? (isDarkTheme
+                      ? "bg-gray-700 text-gray-500"
+                      : "bg-gray-200 text-gray-400") + " cursor-not-allowed"
+                  : isDarkTheme
+                  ? `bg-gradient-to-r ${themeClasses[theme].primary} text-white`
+                  : `bg-gradient-to-r ${themeClasses[theme].primary} text-white`
               } transition-all duration-300`}
             >
               <span className="flex items-center justify-center h-5 w-5">
@@ -329,7 +404,7 @@ const MessageInput = ({
             isDarkTheme ? "text-gray-400" : "text-gray-500"
           } mt-1 text-center font-medium`}
         >
-          Ask me about anything or tell me what you'd like me to do!
+          Ask me about anything or upload a document to process!
         </motion.p>
       </div>
     </div>
